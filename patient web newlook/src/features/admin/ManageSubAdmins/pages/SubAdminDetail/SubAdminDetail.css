@@ -1,0 +1,11 @@
+.sub-admin-detail {
+    padding: 0;
+}
+
+.sub-admin-detail .MuiTabs-indicator {
+    background-color: #E8833A;
+}
+
+.sub-admin-detail .Mui-selected {
+    color: #E8833A !important;
+}

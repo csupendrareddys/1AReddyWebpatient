@@ -1,0 +1,27 @@
+/* ManageRoles page styles */
+.manage-roles {
+  padding: 0;
+}
+
+.manage-roles .MuiTableContainer-root {
+  border-radius: 12px;
+  overflow: auto;
+}
+
+.manage-roles .MuiTableHead-root .MuiTableCell-root {
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.manage-roles .MuiTableBody-root .MuiTableRow-root:hover {
+  background-color: #f8f9ff;
+}
+
+.manage-roles .MuiCheckbox-root {
+  transition: transform 0.15s ease;
+}
+
+.manage-roles .MuiCheckbox-root:hover {
+  transform: scale(1.15);
+}

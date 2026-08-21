@@ -1,0 +1,70 @@
+# Git
+.git
+.gitignore
+
+# Environment files (secrets!)
+.env
+.env.*
+
+# IDE / Editor
+.vscode
+.idea
+*.swp
+
+# Python cache
+__pycache__
+*.pyc
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+
+# Virtual environments
+venv
+env
+.venv
+Environment
+work_env
+
+# Docker compose files (not needed inside the image)
+docker-compose*.yml
+
+# EB deployment config (not needed inside the image)
+.ebextensions
+.elasticbeanstalk
+.platform
+
+# Claude worktrees
+.claude
+
+# CI / GitHub Actions config (not needed inside the image)
+.github
+
+# Markdown / docs at the repo root (README, guides, etc.)
+*.md
+docs
+
+# Logs and temp files
+*.log
+logs.txt
+logs_faliure.txt
+log.txt
+
+# SQL dumps
+*.sql
+
+# Large assets not needed in backend
+*.svg
+*.png
+*.jpg
+
+# Uploads (mounted as volume)
+uploads
+
+# Tests
+tests
+
+# Debug / one-off scripts
+check_*.py
+debug_*.py
+fix_*.py

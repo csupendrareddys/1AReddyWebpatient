@@ -1,0 +1,44 @@
+# jlmush-edge — the Worker that sits in front of Cloudflare Pages.
+#
+# Tenant Custom Hostnames (managed by ``Backend/app/services/cloudflare_saas.py``)
+# point their ``custom_origin_server`` at this Worker's ``*.workers.dev``
+# hostname. The Worker fetches static assets from the
+# ``jlmushiitm-frontend`` Pages project via the ``ASSETS`` binding.
+#
+# Keeping the Worker on the data path from day one — even as a
+# transparent pass-through — means future tenant-host middleware,
+# maintenance modes, or edge WAF rules are a code change, not a
+# re-routing of every tenant Custom Hostname.
+name = "jlmush-edge"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# Bind the Pages project's static assets so the Worker can call
+# ``env.ASSETS.fetch(request)`` and serve the SPA without an HTTP
+# round-trip out of the Cloudflare edge.
+#
+# Note: this is a single ``[assets]`` table, NOT ``[[assets]]`` —
+# wrangler interprets array-of-tables as multiple assets configs and
+# fails with "Unexpected fields found in assets field: 0".
+[assets]
+binding = "ASSETS"
+# Wrangler uploads everything under this directory to the Worker. The
+# CI build runs ``npm run build`` in ``Frontend/`` first, which writes
+# the SPA bundle to ``Frontend/dist`` — same artifact Pages serves.
+directory = "../dist"
+# SPA fallback: serve index.html (with 200) for any path that doesn't
+# match a file in dist/. Without this, deep links like
+# `<slug>.larazen.in/dashboard/admin` 404 because the Worker looks for
+# a literal file at /dashboard/admin which doesn't exist. React Router
+# can only run if index.html actually gets returned for those paths.
+not_found_handling = "single-page-application"
+
+# Wildcard route: every <slug>.larazen.in request hits this Worker.
+# Universal SSL on the zone covers *.larazen.in for free, so no per-
+# subdomain cert work is needed. The Worker reads ASSETS and serves
+# the SPA — same artifact Pages serves, but routed via Worker so
+# Pages' Host-header binding check doesn't reject unknown subdomains
+# (which was the post-Amplify-migration regression).
+[[routes]]
+pattern = "*.larazen.in/*"
+zone_name = "larazen.in"
