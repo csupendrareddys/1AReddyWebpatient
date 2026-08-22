@@ -1,0 +1,520 @@
+/* ================================================
+   JLMUSH Admin Dashboard — Premium Layout System
+   ================================================ */
+
+/* ---------- CSS Custom Properties ---------- */
+:root {
+  --sidebar-width: 260px;
+  --sidebar-collapsed-width: 72px;
+  --topbar-height: 64px;
+  --brand-orange: #E8833A;
+  --brand-orange-light: #FFF3E8;
+  --brand-green: #4CAF50;
+  --brand-green-light: #E8F5E9;
+  --bg-main: #F0F0F5;
+  --bg-sidebar: #FFFFFF;
+  --shadow-soft: 0 2px 12px rgba(0, 0, 0, 0.06);
+  --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.05);
+  --shadow-hover: 0 8px 30px rgba(0, 0, 0, 0.1);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --transition-fast: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-smooth: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ---------- Layout Root ---------- */
+.admin-layout {
+  display: flex;
+  min-height: 100vh;
+  background: var(--bg-main);
+}
+
+.admin-layout__content-wrapper {
+  flex: 1;
+  /* Without min-width:0 this flex child refuses to shrink below its
+     content's intrinsic width, so a wide (nowrap) table blows out the
+     whole page instead of letting inner overflow-x:auto containers scroll. */
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  margin-left: var(--sidebar-width);
+  min-height: 100vh;
+  transition: margin-left var(--transition-smooth);
+}
+
+.admin-layout__main {
+  flex: 1;
+  /* Same reason as above — keep wide children (tables, code blocks) inside
+     the content column so their own scrollbars engage rather than the page's. */
+  min-width: 0;
+  padding: 24px 28px;
+  overflow-y: auto;
+}
+
+/* ---------- Sidebar ---------- */
+.admin-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: var(--sidebar-width);
+  height: 100vh;
+  background: var(--bg-sidebar);
+  border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  z-index: 1200;
+  transition: width var(--transition-smooth);
+  overflow: hidden;
+}
+
+/* Logo area */
+.admin-sidebar__logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 20px 16px;
+}
+
+.admin-sidebar__logo-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--brand-orange), #D4702E);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 28px;
+  box-shadow: 0 4px 12px rgba(232, 131, 58, 0.3);
+}
+
+.admin-sidebar__logo-text {
+  font-weight: 700;
+  font-size: 18px;
+  color: #2D3436;
+  letter-spacing: 0.5px;
+}
+
+/* User info */
+.admin-sidebar__user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  margin: 0 12px 8px;
+  border-radius: var(--radius-md);
+  background: #FAFAFA;
+}
+
+.admin-sidebar__user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand-orange), #D4702E);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.admin-sidebar__user-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-sidebar__user-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: #2D3436;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-sidebar__user-role {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+}
+
+.admin-sidebar__user-role--super {
+  background: var(--brand-orange-light);
+  color: var(--brand-orange);
+}
+
+.admin-sidebar__user-role--sub {
+  background: var(--brand-green-light);
+  color: var(--brand-green);
+}
+
+/* Navigation */
+.admin-sidebar__nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+
+.admin-sidebar__nav::-webkit-scrollbar {
+  width: 4px;
+}
+
+.admin-sidebar__nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.admin-sidebar__nav::-webkit-scrollbar-thumb {
+  background: #DDD;
+  border-radius: 4px;
+}
+
+.admin-sidebar__nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin-bottom: 2px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  color: #636E72;
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  position: relative;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.admin-sidebar__nav-item:hover {
+  background: #F8F8F8;
+  color: #2D3436;
+}
+
+.admin-sidebar__nav-item--active {
+  background: var(--brand-orange-light);
+  color: var(--brand-orange);
+  font-weight: 600;
+}
+
+.admin-sidebar__nav-item--active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 60%;
+  background: var(--brand-orange);
+  border-radius: 0 3px 3px 0;
+}
+
+.admin-sidebar__nav-icon {
+  font-size: 20px !important;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.admin-sidebar__nav-badge {
+  margin-left: auto;
+  background: var(--brand-orange);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* Divider */
+.admin-sidebar__divider {
+  height: 1px;
+  background: #F0F0F0;
+  margin: 8px 20px;
+}
+
+/* Logout */
+.admin-sidebar__logout {
+  padding: 12px 20px;
+  border-top: 1px solid #F0F0F0;
+}
+
+.admin-sidebar__logout-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  color: #B2BEC3;
+  font-size: 14px;
+  font-weight: 500;
+  width: 100%;
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+.admin-sidebar__logout-btn:hover {
+  background: #FFF0F0;
+  color: #E74C3C;
+}
+
+/* ---------- Top Bar ---------- */
+.admin-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 28px;
+  background: transparent;
+}
+
+.admin-topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.admin-topbar__icon-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  color: #636E72;
+}
+
+.admin-topbar__icon-btn:hover {
+  box-shadow: var(--shadow-soft);
+  color: var(--brand-orange);
+  transform: translateY(-1px);
+}
+
+.admin-topbar__avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand-orange), #D4702E);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 600;
+  font-size: 14px;
+  margin-left: 8px;
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.admin-topbar__avatar:hover {
+  transform: scale(1.05);
+}
+
+/* ---------- Page Content Cards ---------- */
+.admin-page-card {
+  background: white;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 24px;
+  margin-bottom: 20px;
+  transition: box-shadow var(--transition-smooth);
+}
+
+.admin-page-card:hover {
+  box-shadow: var(--shadow-hover);
+}
+
+.admin-page-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.admin-page-card__title {
+  font-weight: 600;
+  font-size: 18px;
+  color: #2D3436;
+}
+
+/* ---------- Dark Mode Overrides ---------- */
+[data-theme='dark'] .admin-sidebar,
+.dark-mode .admin-sidebar {
+  background: #1E1E2D;
+}
+
+[data-theme='dark'] .admin-sidebar__logo-text,
+.dark-mode .admin-sidebar__logo-text {
+  color: #E0E0E0;
+}
+
+[data-theme='dark'] .admin-sidebar__user,
+.dark-mode .admin-sidebar__user {
+  background: #2A2A3C;
+}
+
+[data-theme='dark'] .admin-sidebar__user-name,
+.dark-mode .admin-sidebar__user-name {
+  color: #E0E0E0;
+}
+
+[data-theme='dark'] .admin-sidebar__nav-item,
+.dark-mode .admin-sidebar__nav-item {
+  color: #A0A0B0;
+}
+
+[data-theme='dark'] .admin-sidebar__nav-item:hover,
+.dark-mode .admin-sidebar__nav-item:hover {
+  background: #2A2A3C;
+  color: #E0E0E0;
+}
+
+[data-theme='dark'] .admin-sidebar__nav-item--active,
+.dark-mode .admin-sidebar__nav-item--active {
+  background: rgba(232, 131, 58, 0.15);
+  color: var(--brand-orange);
+}
+
+[data-theme='dark'] .admin-topbar__icon-btn,
+.dark-mode .admin-topbar__icon-btn {
+  background: #2A2A3C;
+  color: #A0A0B0;
+}
+
+[data-theme='dark'] .admin-topbar__icon-btn:hover,
+.dark-mode .admin-topbar__icon-btn:hover {
+  color: var(--brand-orange);
+}
+
+[data-theme='dark'] .admin-page-card,
+.dark-mode .admin-page-card {
+  background: #1E1E2D;
+}
+
+[data-theme='dark'] .admin-page-card__title,
+.dark-mode .admin-page-card__title {
+  color: #E0E0E0;
+}
+
+[data-theme='dark'] .admin-sidebar__divider,
+.dark-mode .admin-sidebar__divider {
+  background: #333;
+}
+
+/* ---------- Collapsed Sidebar ---------- */
+.admin-sidebar--collapsed {
+  width: var(--sidebar-collapsed-width);
+}
+
+.admin-layout--collapsed .admin-layout__content-wrapper {
+  margin-left: var(--sidebar-collapsed-width);
+}
+
+/* Collapsed logo */
+.admin-sidebar--collapsed .admin-sidebar__logo {
+  justify-content: center;
+  padding: 20px 12px 16px;
+}
+
+.admin-sidebar--collapsed .admin-sidebar__logo-icon {
+  width: 40px;
+  height: 40px;
+  font-size: 22px;
+}
+
+/* Collapsed user */
+.admin-sidebar__user-collapsed {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 12px;
+  margin: 0 8px 8px;
+}
+
+/* Collapsed nav */
+.admin-sidebar--collapsed .admin-sidebar__nav {
+  padding: 8px 8px;
+}
+
+.admin-sidebar--collapsed .admin-sidebar__nav-item {
+  justify-content: center;
+  padding: 10px;
+  gap: 0;
+}
+
+.admin-sidebar--collapsed .admin-sidebar__nav-item span {
+  display: none;
+}
+
+.admin-sidebar--collapsed .admin-sidebar__divider {
+  margin: 8px 10px;
+}
+
+/* ---------- Bottom Section (toggle + logout) ---------- */
+.admin-sidebar__bottom {
+  padding: 8px 12px 16px;
+  margin-top: auto;
+}
+
+.admin-sidebar__toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  color: #B2BEC3;
+  font-size: 14px;
+  font-weight: 500;
+  width: 100%;
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+.admin-sidebar__toggle-btn:hover {
+  background: #F8F8F8;
+  color: #2D3436;
+}
+
+.admin-sidebar--collapsed .admin-sidebar__bottom {
+  padding: 8px 8px 16px;
+}
+
+.admin-sidebar--collapsed .admin-sidebar__toggle-btn,
+.admin-sidebar--collapsed .admin-sidebar__logout-btn {
+  justify-content: center;
+  padding: 10px;
+  gap: 0;
+}
+
+.admin-sidebar--collapsed .admin-sidebar__toggle-btn span,
+.admin-sidebar--collapsed .admin-sidebar__logout-btn span {
+  display: none;
+}
+
+/* Dark mode for bottom section */
+.dark-mode .admin-sidebar__toggle-btn:hover {
+  background: #2A2A3C;
+  color: #E0E0E0;
+}

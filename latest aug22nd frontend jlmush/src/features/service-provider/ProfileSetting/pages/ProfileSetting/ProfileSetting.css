@@ -1,0 +1,89 @@
+.doctor-profile-container {
+    padding-bottom: 100px; /* Space for sticky footer */
+}
+
+.section-header {
+    margin-bottom: 1rem;
+}
+
+.profile-image-container {
+    position: relative;
+    display: inline-block;
+}
+
+.profile-image-upload-btn {
+    position: absolute !important;
+    bottom: 0;
+    right: 0;
+    background-color: #fff !important;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+.gender-icon {
+    font-size: 2.5rem !important;
+    cursor: pointer;
+    color: #ccc;
+    transition: all 0.3s ease;
+}
+
+.gender-icon:hover {
+    transform: scale(1.1);
+}
+
+.gender-male.selected {
+    color: #1976d2;
+}
+
+.gender-female.selected {
+    color: #e91e63;
+}
+
+.gender-other.selected {
+    color: #9c27b0;
+}
+
+.section-title-bar {
+    background-color: #f5f5f5;
+    padding: 8px 16px;
+    font-weight: 600;
+    border-radius: 4px;
+    margin-bottom: 16px;
+    border-left: 4px solid #1976d2;
+}
+
+.action-buttons-container {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: #fff;
+    padding: 16px 0;
+    box-shadow: 0 -2px 10px rgba(0,0,0,0.1);
+    z-index: 1000;
+}
+
+/* Calendar Styles */
+.calendar-container {
+    margin-top: 1rem;
+}
+
+.calendar-day-card {
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 1rem;
+    transition: all 0.2s;
+    height: 100%;
+}
+
+.calendar-day-card.active {
+    border-color: #1976d2;
+    background-color: #e3f2fd;
+}
+
+.calendar-day-card:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.slot-chip {
+    margin: 2px;
+}

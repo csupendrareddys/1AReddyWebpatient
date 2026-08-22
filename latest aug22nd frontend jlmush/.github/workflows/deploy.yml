@@ -1,0 +1,100 @@
+# TEST deploy — every push to main builds the SPA in ``testing`` mode
+# (.env.testing → the test domain) and deploys BOTH test surfaces in
+# lockstep, mirroring deploy-prod.yml:
+#   1. ``jlmushiitmfrontend-test`` Pages project (apex/www of the test
+#      domain are attached to it by Terraform envs/test)
+#   2. ``jlmush-edge-test`` Worker — serves <slug>.<test-domain> tenant
+#      hosts via its wildcard route (worker/wrangler.toml [env.test])
+#
+# PRODUCTION is a separate, human-approved promotion (deploy-prod.yml)
+# that rebuilds the verified SHA in production mode and deploys the
+# prod Pages project + the ``jlmush-edge`` Worker.
+#
+# The Terraform infra repo (envs/test) creates the Pages project and
+# the jucf.org zone's DNS; first deploy will fail until that apply has
+# run.
+#
+# Required GitHub Actions secrets:
+#   CLOUDFLARE_API_TOKEN   — Pages Edit + Workers Scripts Edit + Zone
+#                            Workers Routes Edit (on the TEST zone too)
+#   CLOUDFLARE_ACCOUNT_ID  — the account hosting the Pages projects.
+#
+# Path filter keeps unrelated commits (docs, configs outside src) from
+# burning CI minutes.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'vite.config.js'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'worker/**'
+      - '.env.testing'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+jobs:
+  deploy-test:
+    runs-on: ubuntu-latest
+    environment: testing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22+ is required by ``wrangler@4`` (otherwise: "Wrangler
+          # requires at least Node.js v22.0.0").
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install SPA dependencies
+        run: npm ci
+
+      - name: Build SPA (testing mode)
+        # ``--mode testing`` makes Vite read ``.env.testing`` (committed)
+        # instead of ``.env.production`` — api-test URLs, Razorpay test key.
+        run: npm run build -- --mode testing
+
+      - name: Deploy to Cloudflare Pages (jlmushiitmfrontend-test)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PAGES_PROJECT_NAME: jlmushiitmfrontend-test
+        run: |
+          npx wrangler@4.44.0 pages deploy dist \
+            --project-name="$PAGES_PROJECT_NAME" \
+            --branch=main \
+            --commit-hash=${{ github.sha }}
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm install --no-package-lock
+
+      - name: Deploy jlmush-edge-test Worker
+        # Same testing-mode dist/ the Pages step uploaded — deploying both
+        # surfaces from one build prevents asset-hash drift between them.
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # --config is REQUIRED, not tidiness: `npm run build` leaves a
+        # .wrangler/deploy/config.json redirect (written by the Vite
+        # Cloudflare plugin) pointing at dist/wrangler.json. Without an
+        # explicit config wrangler follows that redirect and fails with
+        # "you have specified the environment test, but are using a
+        # redirected configuration" — the root wrangler.jsonc has no
+        # environments and no assets.directory.
+        run: npx wrangler@4.44.0 deploy --env test --config wrangler.toml

@@ -1,0 +1,13 @@
+{
+    "name": "jlmush-edge",
+    "private": true,
+    "version": "0.1.0",
+    "scripts": {
+        "deploy": "wrangler deploy"
+    },
+    "devDependencies": {
+        "@cloudflare/workers-types": "^4.20251001.0",
+        "wrangler": "^3.80.0",
+        "typescript": "^5.4.0"
+    }
+}

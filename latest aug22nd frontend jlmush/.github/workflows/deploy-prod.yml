@@ -1,0 +1,87 @@
+# PRODUCTION promotion for the SPA.
+#
+# Checks out the EXACT commit that was verified on test, builds it in
+# production mode (.env.production — api.larazen.in, live Razorpay key),
+# and deploys BOTH prod surfaces from the same dist/:
+#   1. ``jlmushiitmfrontend`` Pages project — external tenant custom domains
+#   2. ``jlmush-edge`` Worker — www.larazen.in + *.larazen.in subdomains
+# Deploying both in lockstep prevents asset-hash drift between surfaces.
+#
+# To promote:
+#   1. Verify the change on https://jlmushiitmfrontend-test.pages.dev
+#   2. Actions → deploy-prod → Run workflow → paste the full commit SHA
+#   3. Approve the "production" environment gate
+#
+# Required secrets: CLOUDFLARE_API_TOKEN (Pages Edit + Workers Scripts Edit
+# + Zone Workers Routes Edit), CLOUDFLARE_ACCOUNT_ID.
+
+name: deploy-prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA to promote (verified on test)
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install SPA dependencies
+        run: npm ci
+
+      - name: Build SPA (production mode)
+        # Vite reads ``.env.production`` (committed) — VITE_API_BASE_URL
+        # etc. Writes the bundle to ``./dist`` which both prod surfaces
+        # consume.
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages (jlmushiitmfrontend)
+        # Serves external tenant custom domains (Pages Custom Domains are
+        # how the backend's ``CloudflareSaasService.create_or_update``
+        # binds e.g. ``www.vedanthzen.com``). Pages project name must
+        # match the backend's ``CLOUDFLARE_PAGES_PROJECT_NAME`` env var.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PAGES_PROJECT_NAME: jlmushiitmfrontend
+        run: |
+          npx wrangler@4.44.0 pages deploy dist \
+            --project-name="$PAGES_PROJECT_NAME" \
+            --branch=main \
+            --commit-hash=${{ inputs.sha }}
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm install --no-package-lock
+
+      - name: Deploy jlmush-edge Worker
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # --config is REQUIRED — see the same note in deploy.yml. The build
+        # leaves a .wrangler/deploy/config.json redirect pointing at
+        # dist/wrangler.json, and wrangler follows it in preference to this
+        # directory's wrangler.toml, then fails on the root config's missing
+        # assets.directory.
+        run: npx wrangler@4.44.0 deploy --config wrangler.toml

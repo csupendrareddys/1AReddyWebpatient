@@ -1,0 +1,13 @@
+services:
+  frontend:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+  
+  backend:
+    build: ./mock_backend/.
+    ports:
+      - "5001:5001"

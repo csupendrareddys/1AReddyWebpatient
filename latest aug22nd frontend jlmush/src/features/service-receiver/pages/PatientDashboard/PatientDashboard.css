@@ -1,0 +1,40 @@
+/* Patient Dashboard Styles */
+
+.patient-dashboard {
+    min-height: 100vh;
+}
+
+/* Platform Cards Grid */
+.platform-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+}
+
+/* Order Cards */
+.order-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    background: rgba(0, 0, 0, 0.02);
+    border-radius: 12px;
+}
+
+/* Tabs styling */
+.MuiTabs-root {
+    margin-bottom: 24px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 600px) {
+    .platform-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
