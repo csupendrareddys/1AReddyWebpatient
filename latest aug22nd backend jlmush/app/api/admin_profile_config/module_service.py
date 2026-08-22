@@ -1,0 +1,29 @@
+"""Admin Profile — per-module lifecycle service (Round 9, Phase 3)."""
+from __future__ import annotations
+
+from app.common.module_lifecycle import ModuleLifecycle, build_lifecycle
+from app.api.admin_profile_config.modules import (
+    MODULE_TO_SECTIONS, MODULE_KEYS,
+)
+from app.api.admin_profile_config.default_fields import (
+    ADMIN_PROFILE_FIELDS,
+)
+from app.models import PageType
+
+
+PAGE_TYPE = PageType.ADMIN_PROFILE
+PAGE_TYPE_STR = 'admin_profile'
+
+
+def for_module(module: str) -> ModuleLifecycle:
+    return build_lifecycle(
+        page_type=PAGE_TYPE,
+        page_type_str=PAGE_TYPE_STR,
+        module=module,
+        module_to_sections=MODULE_TO_SECTIONS,
+        default_fields=ADMIN_PROFILE_FIELDS,
+    )
+
+
+def list_modules() -> tuple[str, ...]:
+    return MODULE_KEYS

@@ -1,0 +1,44 @@
+name: deploy
+
+# TEST deploy — every merge to main lands on the TEST EC2 box automatically.
+# Production is a separate, human-approved promotion: deploy-prod.yml.
+#
+# Triggers:
+#   1. Automatically after `release.yml` succeeds on main (every merge)
+#   2. Manually via "Run workflow" button (re-deploy without a new build)
+#
+# The deploy mechanics live in the reusable deploy-env.yml (single source
+# of truth for test AND prod).
+#
+# Required secrets:
+#   ENVIRONMENT `testing`  -> EC2_HOST, EC2_USER, EC2_SSH_KEY (the test box)
+#   REPOSITORY             -> DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+#
+# The box credentials are ENVIRONMENT secrets, not repo secrets, so this
+# workflow cannot reach the production box even by accident: it asks for
+# `testing`, and that is the only EC2_* it can see. deploy-prod.yml asks
+# for `production` and sees the other set. Same three names, two values —
+# the old TEST_ prefix was doing this job by naming convention, which
+# left the production key readable by every workflow in the repo.
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy-test:
+    name: deploy to test EC2
+    # Only deploy if release succeeded, or if manually triggered
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      gh_environment: testing
+      image_tag: main
+    # Carries the repo-level DOCKERHUB_* through; EC2_* come from the
+    # `testing` environment inside deploy-env.yml.
+    secrets: inherit

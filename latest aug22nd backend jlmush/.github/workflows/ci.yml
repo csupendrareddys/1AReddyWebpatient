@@ -1,0 +1,360 @@
+name: ci
+
+# PR-gated validation for GitHub Flow.
+# Runs on every pull request targeting `main`. Builds both Docker images
+# locally on the runner, verifies the Flask app factory boots cleanly
+# inside the backend image, and verifies the redis image authenticates
+# correctly. Does NOT push anything to any registry.
+#
+# Branch protection on `main` requires this workflow's `build-and-smoke`
+# job to pass before a PR can be merged.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    name: build images + container smoke
+    runs-on: ubuntu-latest
+
+    # Ephemeral Postgres — used by the migration verification step below.
+    # Bound to a non-standard host port so it doesn't collide with the
+    # PostgreSQL pre-installed on Ubuntu runners (which sometimes listens
+    # on 5432 with different credentials).
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ci_migrations
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+      # Ephemeral Redis — required by ``AuthService.signin()`` which
+      # writes the refresh-token jti through ``SessionStore``. Without
+      # this, signin returns 401 ``Authentication service temporarily
+      # unavailable`` and the cross-tenant signin tests can't assert
+      # the 200/JWT happy path. Plain ``redis:7-alpine`` (no auth) on
+      # 127.0.0.1:6379 — the test container uses ``--network host``,
+      # so the service container's port shows up on localhost.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build (no push) ───────────────────────────────────────
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          push: false
+          tags: jlmush-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Build redis image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.redis
+          load: true
+          push: false
+          tags: jlmush-redis:ci
+          cache-from: type=gha,scope=redis
+          cache-to: type=gha,scope=redis,mode=max
+
+      # ── Backend smoke: does the Flask app factory boot AND do
+      # all blueprints register their expected routes? ─────────
+      # The first assertion catches import-level breakage. The second
+      # enumerates URL rules the modular structure must expose so
+      # that accidentally-broken blueprints surface here instead of
+      # as a 404 in production. Extend the ``required`` list whenever
+      # a new module ships.
+      #
+      # No real DB/Redis connection happens — SQLAlchemy only
+      # init_app's on create_app and doesn't open connections until
+      # a route actually runs a query.
+      #
+      # ENCRYPTION_KEY is a valid Fernet key (32 bytes url-safe base64,
+      # 44 chars). It never encrypts real data — CI generates a fresh
+      # app instance and discards it.
+      - name: Smoke test — Flask app boots + blueprints register
+        run: |
+          docker run --rm \
+            -e FLASK_ENV=testing \
+            -e SECRET_KEY=ci-smoke-secret-not-used-in-prod \
+            -e JWT_SECRET_KEY=ci-smoke-jwt-not-used-in-prod \
+            -e ENCRYPTION_KEY=cFwW6WZJJ1bhVtqPzB6GdFkbN5tOqRlIGqmKn-yHHqE= \
+            -e DATABASE_URL=sqlite:///:memory: \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e CORS_ORIGINS=http://localhost:3000 \
+            -e FRONTEND_URL=http://localhost:3000 \
+            -e AWS_ACCESS_KEY_ID=ci-smoke \
+            -e AWS_SECRET_ACCESS_KEY=ci-smoke \
+            -e AWS_S3_REGION=ap-south-1 \
+            --entrypoint python \
+            jlmush-backend:ci \
+            -c "
+          from app import create_app
+          app = create_app()
+          assert app is not None, 'create_app() returned None'
+
+          # The modular backend must expose these URL prefixes. Adding
+          # a new blueprint? Append its prefix to ``required`` so CI
+          # turns red if its registration ever regresses.
+          rules = {str(r) for r in app.url_map.iter_rules()}
+          # Landing v2 moved from ``/api/landing-page-config/public/<tenant_slug>``
+          # to ``/api/landing/public`` (tenant context comes from the request,
+          # not the URL). Module/feature public lookups live at the nested
+          # prefixes below and are part of the same blueprint.
+          #
+          # Every client-facing route carries the ``/api/v1`` prefix — see the
+          # backend CLAUDE.md; there are deliberately NO unversioned aliases.
+          # ``/health`` is one of the handful that stays unversioned on
+          # purpose (alongside /internal/*, /static, /uploads, /socket.io).
+          required = [
+              '/health',
+              '/api/v1/auth/signin',
+              '/api/v1/auth/signup',
+              '/api/v1/page-config/public/<page_type>',
+              '/api/v1/landing/public',
+              '/api/v1/landing/public/modules/<slug>',
+              '/api/v1/landing/public/features/<slug>',
+              # Recognitions + video gallery — added 2026-04. The frontend
+              # hits these on every landing-page load; a missing rule
+              # surfaces as 404 console-error spam in production rather
+              # than a hard failure.
+              '/api/v1/landing/public/recognitions',
+              '/api/v1/landing/public/videos',
+              '/api/v1/platform/tenants',
+          ]
+          # Exact match, not substring. A substring test passes for the wrong
+          # reason — '/health' is contained in '/api/v1/patient/health-records',
+          # so the real health endpoint could be deleted and CI would stay
+          # green. Every entry above is a complete rule string.
+          missing = [p for p in required if p not in rules]
+          assert not missing, f'Missing URL rules: {missing}'
+          print(f'[OK] Flask app boots cleanly with {len(rules)} URL rules')
+          print(f'[OK] All {len(required)} required blueprints registered')
+          "
+
+      # ── Migration verification ────────────────────────────────
+      # Three checks against the ephemeral Postgres service above:
+      #
+      #   A. Bootstrap on empty DB succeeds
+      #      (scripts/migrate.py → db.create_all + stamp head)
+      #
+      #   B. Re-run is idempotent
+      #      (second call detects existing alembic_version, runs upgrade — no-op)
+      #
+      #   C. Schema parity: ``flask db migrate`` against the bootstrapped
+      #      DB must produce "No changes in schema detected". This catches
+      #      the most common mistake: model changed but no migration
+      #      committed (or migration committed but model not updated).
+      #
+      # ``FLASK_ENV=development`` is used (not ``testing``) because the
+      # development config respects ``DATABASE_URL``. The testing config
+      # reads ``TEST_DATABASE_URL`` which the rest of the codebase
+      # doesn't expect.
+      #
+      # ``127.0.0.1`` (not ``localhost``) forces IPv4 — runner localhost
+      # resolves to ``::1`` first which can hit a different listener.
+      - name: Smoke test — migrations bootstrap, idempotent, schema parity
+        run: |
+          set -e
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:55432/ci_migrations"
+
+          run_in_image() {
+            docker run --rm \
+              --network host \
+              -e FLASK_APP=wsgi:app \
+              -e FLASK_ENV=development \
+              -e SECRET_KEY=ci-smoke-secret \
+              -e JWT_SECRET_KEY=ci-smoke-jwt \
+              -e ENCRYPTION_KEY=cFwW6WZJJ1bhVtqPzB6GdFkbN5tOqRlIGqmKn-yHHqE= \
+              -e DATABASE_URL="$DB_URL" \
+              -e REDIS_URL=redis://127.0.0.1:6379/0 \
+              -e CORS_ORIGINS=http://localhost:3000 \
+              -e FRONTEND_URL=http://localhost:3000 \
+              -e AWS_ACCESS_KEY_ID=ci-smoke \
+              -e AWS_SECRET_ACCESS_KEY=ci-smoke \
+              -e AWS_S3_REGION=ap-south-1 \
+              -e SOCKETIO_ASYNC_MODE= \
+              jlmush-backend:ci "$@"
+          }
+          # SOCKETIO_ASYNC_MODE is cleared above deliberately: the image bakes
+          # it to "eventlet" for gunicorn, but for the flask CLI it makes
+          # wsgi.py monkey-patch AFTER the CLI already imported flask/werkzeug,
+          # which spews caught RuntimeError tracebacks ("Working outside of
+          # application context", "1 RLock(s) were not greened") into every
+          # migration step's log. Cosmetic — the steps still pass — but the
+          # noise reads like a failure. CLI runs don't serve sockets and don't
+          # need eventlet at all.
+
+          echo "=== Guard: exactly one Alembic head ==="
+          # Multiple heads happen when two branches add a migration from the
+          # same parent revision. It breaks bootstrap/roundtrip/parity below
+          # with a cryptic "Multiple heads are present". Fail fast with the fix.
+          HEADS=$(run_in_image flask db heads 2>/dev/null | grep -cE '\(head\)$' || true)
+          if [ "${HEADS:-0}" -gt 1 ]; then
+            echo "::error::Multiple Alembic migration heads detected (${HEADS})."
+            echo ""
+            echo "Heads:"
+            run_in_image flask db heads 2>/dev/null | grep -E '\(head\)$' || true
+            echo ""
+            echo "Fix (creates a merge revision that unifies them):"
+            echo "    git merge origin/main         # bring both lineages together"
+            echo "    flask db merge heads -m 'merge migration heads'"
+            echo "    git add migrations/versions/*_merge*.py && git commit && git push"
+            echo ""
+            echo "Prevent next time: branch/rebase your feature onto the LATEST main"
+            echo "before adding a migration, so its down_revision is main's head."
+            exit 1
+          fi
+          echo "[OK] single migration head"
+
+          echo "=== A. Bootstrap on empty DB ==="
+          run_in_image python scripts/migrate.py
+
+          echo "=== B. Idempotent re-run (existing DB → upgrade no-op) ==="
+          run_in_image python scripts/migrate.py
+
+          # ── A.2: rollback + re-upgrade the latest migration ────────
+          # The bootstrap above uses ``db.create_all()`` which derives
+          # the schema from MODELS — so FK targets, column names etc.
+          # are always whatever the Python code says. That blind spot
+          # hides bugs where a migration *script* references a column
+          # that doesn't exist on the referenced table (e.g. typing
+          # ``tenants.tenant_id`` when the actual PK is ``tenants.id``).
+          # In production the migration's SQL runs against the existing
+          # schema and explodes — exactly the failure that surfaced
+          # 2026-04-28.
+          #
+          # We catch it by exercising the migration's actual upgrade()
+          # against the bootstrapped DB: downgrade by one revision,
+          # then upgrade back. This runs the script's CREATE / ALTER
+          # SQL against real Postgres without depending on every
+          # historical migration being able to run from empty (which
+          # they can't, by design — bootstrap is create_all-based).
+          echo "=== A.2. Roundtrip latest migration (downgrade -1 → upgrade) ==="
+          # See ``scripts/migrate_roundtrip.py`` for why this exists and
+          # why it's a script rather than an inline ``flask db ...``
+          # invocation (Click eats the ``-1`` as an option flag).
+          run_in_image python scripts/migrate_roundtrip.py
+
+          echo "=== Verifying alembic_version row was stamped ==="
+          docker run --rm --network host \
+            -e PGPASSWORD=postgres postgres:15-alpine \
+            psql -h 127.0.0.1 -p 55432 -U postgres -d ci_migrations \
+            -t -A -c "SELECT version_num FROM alembic_version" | tee /tmp/rev.txt
+          test -s /tmp/rev.txt || (echo "[FAIL] alembic_version is empty"; exit 1)
+
+          echo "=== C. Schema parity: model ↔ migrations must agree ==="
+          # ``flask db migrate`` autogenerates a migration from the diff
+          # between current models and current DB schema. After bootstrap,
+          # they must match exactly. Any non-"No changes" output means
+          # someone updated a model without committing a migration.
+          PARITY=$(run_in_image flask db migrate -m "ci-drift-check" 2>&1 || true)
+          echo "$PARITY"
+          if echo "$PARITY" | grep -q "No changes in schema detected"; then
+            echo "[OK] model ↔ migrations are in sync"
+          else
+            echo ""
+            echo "[FAIL] Model and migrations have diverged."
+            echo "       Run locally:  flask db migrate -m 'describe your change'"
+            echo "       then commit the new file under migrations/versions/"
+            exit 1
+          fi
+
+      # ── Endpoint smoke: actually call the public routes ───────────
+      # The "Flask app boots" step above proved the routes are registered.
+      # This step proves they *respond without 5xx-ing* against a real
+      # bootstrapped DB — the layer that was missing when the production
+      # "backend not up" / "console error on /page-config/public/<...>"
+      # regressions slipped through. Tests live under
+      # ``tests/api/test_*_public.py`` and use the fresh-tenant fixture
+      # to isolate per-test data via RLS.
+      - name: Smoke test — public endpoints respond without 5xx
+        run: |
+          set -e
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:55432/ci_migrations"
+          # The production image deliberately ships only what production
+          # needs (no tests/, no pytest). For CI we:
+          #   1. Bind-mount the host repo's ``tests/`` and ``conftest.py``
+          #      into ``/app/tests`` and ``/app/conftest.py`` so pytest
+          #      can find them at the cwd ``/app``.
+          #   2. ``pip install --user pytest`` so the non-root ``appuser``
+          #      can install into ``~/.local`` (no privilege escalation).
+          #   3. Invoke via ``python -m pytest`` so we don't depend on
+          #      pytest being on PATH.
+          # Trade-off: ~15s extra for the install vs. carrying a separate
+          # "test" image. Acceptable while the test surface is small.
+          docker run --rm \
+            --network host \
+            -v "$(pwd)/tests:/app/tests:ro" \
+            -v "$(pwd)/pytest.ini:/app/pytest.ini:ro" \
+            -e FLASK_ENV=testing \
+            -e SECRET_KEY=ci-smoke-secret \
+            -e JWT_SECRET_KEY=ci-smoke-jwt \
+            -e ENCRYPTION_KEY=cFwW6WZJJ1bhVtqPzB6GdFkbN5tOqRlIGqmKn-yHHqE= \
+            -e DATABASE_URL="$DB_URL" \
+            -e TEST_DATABASE_URL="$DB_URL" \
+            -e REDIS_URL=redis://127.0.0.1:6379/0 \
+            -e TEST_REDIS_URL=redis://127.0.0.1:6379/0 \
+            -e CORS_ORIGINS=http://localhost:3000 \
+            -e FRONTEND_URL=http://localhost:3000 \
+            -e AWS_ACCESS_KEY_ID=ci-smoke \
+            -e AWS_SECRET_ACCESS_KEY=ci-smoke \
+            -e AWS_S3_REGION=ap-south-1 \
+            --entrypoint sh \
+            jlmush-backend:ci \
+            -c 'pip install --user --quiet --no-cache-dir pytest && python -m pytest -q tests/api/test_app_boots.py tests/api/test_landing_public.py tests/api/test_page_config_public.py tests/test_patient_profile.py tests/test_auth_tenant_isolation.py tests/test_cloudflare_dns_config.py tests/test_cross_tenant_auth.py tests/test_phase3_trusted_host.py tests/test_plan_feature_enforcement.py tests/test_cloudflare_saas.py'
+
+      # ── Redis smoke: does the image start and auth? ──────────
+      - name: Smoke test — redis image starts and authenticates
+        run: |
+          docker run -d --name redis-smoke \
+            -e REDIS_PASSWORD=ci-smoke-password \
+            jlmush-redis:ci
+          # Give redis a moment to initialize
+          sleep 2
+          # PING with auth — expect PONG
+          docker exec redis-smoke redis-cli -a ci-smoke-password PING | tee /tmp/redis-ping.txt
+          grep -q PONG /tmp/redis-ping.txt && echo "[OK] Redis responds to authenticated PING"
+          # Cleanup
+          docker rm -f redis-smoke
+
+      - name: Summary
+        run: |
+          echo "### CI result" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Backend image built" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Redis image built" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Flask app factory boots inside backend image" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Required blueprints registered" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Migration bootstrap + idempotency + schema parity + latest-revision roundtrip" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Public endpoints respond without 5xx (pytest)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Redis image authenticates" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No images were pushed. Images will be published to DockerHub by \`release.yml\` after this PR merges." >> $GITHUB_STEP_SUMMARY

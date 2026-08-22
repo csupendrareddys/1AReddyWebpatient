@@ -1,0 +1,64 @@
+"""
+RBAC Audit Model & Utilities
+============================
+Separated from Rbac.py to avoid circular imports.
+"""
+import uuid
+from sqlalchemy.dialects.postgresql import UUID, JSON
+from sqlalchemy import Index
+
+from app.extensions import db
+from Rbac import PermissionModule, utcnow
+
+class RolePermissionAuditLog(db.Model):
+    __tablename__ = 'role_permission_audit_log'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='audit_id')
+    role_permission_id = db.Column(UUID(as_uuid=True), nullable=False, index=True)
+    role_id = db.Column(UUID(as_uuid=True), db.ForeignKey('roles.role_id', ondelete='CASCADE'), nullable=False, index=True)
+    module = db.Column(db.Enum(PermissionModule), nullable=False, index=True)
+    changed_by_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True)
+    action = db.Column(db.String(50), nullable=False)
+    change_reason = db.Column(db.Text, nullable=True)
+    before_snapshot = db.Column(JSON, nullable=True)
+    after_snapshot = db.Column(JSON, nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    
+    role = db.relationship('Role', backref=db.backref('permission_audit_log', lazy='dynamic'))
+    changed_by = db.relationship('User', foreign_keys=[changed_by_id])
+    
+    __table_args__ = (
+        Index('ix_audit_role_module', 'role_id', 'module'),
+        Index('ix_audit_changed_by', 'changed_by_id', 'created_at'),
+    )
+    
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'role_id': str(self.role_id),
+            'role_name': self.role.name if self.role else None,
+            'module': self.module.value,
+            'action': self.action,
+            'change_reason': self.change_reason,
+            'changed_by_id': str(self.changed_by_id) if self.changed_by_id else None,
+            'changed_by_name': (self.changed_by.admin_profile.full_name 
+                               if self.changed_by and self.changed_by.admin_profile 
+                               else 'System'),
+            'before': self.before_snapshot,
+            'after': self.after_snapshot,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+def create_permission_audit(perm, action, changed_by_id, before_snapshot=None, reason=None):
+    audit = RolePermissionAuditLog(
+        role_permission_id=perm.id,
+        role_id=perm.role_id,
+        module=perm.module,
+        changed_by_id=changed_by_id,
+        action=action,
+        change_reason=reason,
+        before_snapshot=before_snapshot,
+        after_snapshot=perm.to_dict() if action != 'delete' else None,
+    )
+    db.session.add(audit)
+    return audit

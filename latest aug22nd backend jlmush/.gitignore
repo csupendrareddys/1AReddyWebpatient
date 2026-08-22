@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+*.manifest
+*.spec
+
+# Virtual environment
+venv/
+env/
+.env
+.venv/
+Environment/
+
+# Environment files (NEVER commit these!)
+.env
+.env.development
+.env.testing
+.env.production
+.flaskenv
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Flask/SQLAlchemy
+instance/
+*.db
+*.sqlite
+
+# Uploads (user-generated files)
+uploads/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Migrations (uncomment if you want to track migrations in git)
+# migrations/versions/*.py
+
+# Docker
+*.pid
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Redis dump
+dump.rdb
+
+# deployment artifacts
+elasticbeanstalk/
+.elasticbeanstalk/app_versions/
+eb_full_logs.txt
+current_logs.txt
+model_append.txt
+.claude/
+# migrations/ — needed for DB version control
+.claude/worktrees/
+
+# .ebextensions/ — needed for EB deployment
+# .elasticbeanstalk/ — EB CLI config (local only)
+.elasticbeanstalk/
+# .platform/ — needed for EB deployment
+check_config.py
+check_enum.py
+debug_rbac.py
+fix_approvals.py
+fix_doctor_approval_sync.py
+fix_enum.py
+fix_payment_enum.py
+logs.txt
+logs_faliure.txt
+work_env/
+csv_backup/
+healthcare_backup.dump
+healthcare_backup.sql
+initial_migration.py

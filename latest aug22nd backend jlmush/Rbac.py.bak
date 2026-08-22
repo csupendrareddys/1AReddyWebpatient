@@ -1,0 +1,1494 @@
+"""
+RBAC (Role-Based Access Control) Models for Healthcare Sub-Admin System
+========================================================================
+
+Architecture Overview:
+- Role: Named collection of permissions (e.g., "Operational Team Junior", "Senior Manager")
+- Permission: Granular access control per module + action + data range
+- SubAdminRole: Links Admin users to one or more Roles
+- ApprovalRequest: Workflow for doctor/patient profile changes requiring admin approval
+
+Permission Actions:
+  VIEW   - Read-only access (data analysis teams)
+  EDIT   - Modify basic/non-sensitive fields
+  UPDATE - Modify sensitive/high-security fields (triggers approval workflow)
+  CREATE - Create new records
+  DELETE - Soft-delete records
+
+Verification Levels (tied to role levels):
+  L1_VERIFIER - Can approve Level 1 verifications (customer support)
+  L2_VERIFIER - Can approve Level 2 verifications (sub admin)
+  L3_VERIFIER - Can approve Level 3 verifications (super admin)
+
+Data Range: Controls how far back in time the role can access data
+  LAST_15_DAYS, LAST_32_DAYS, 1_MONTH, 2_MONTHS, 60_DAYS, 90_DAYS, 180_DAYS, 360_DAYS, ALL
+
+Lock/Unlock: Can the role lock/unlock user accounts
+"""
+
+import uuid
+import enum
+from datetime import datetime, timezone
+from sqlalchemy.dialects.postgresql import UUID, JSON
+from sqlalchemy import Index, CheckConstraint
+
+from app.extensions import db
+
+
+def utcnow():
+    """Returns timezone-aware datetime (matching your existing convention)."""
+    return datetime.now(timezone.utc)
+
+
+# ============================================================================
+# ENUMS
+# ============================================================================
+
+class PermissionAction(enum.Enum):
+    """Core permission actions."""
+    FULL_ACCESS = 'full_access'
+    VIEW = 'view'
+    CREATE = 'create'
+    EDIT = 'edit'          # Basic/non-sensitive fields
+    UPDATE = 'update'      # High-sensitivity fields (triggers approval)
+    DELETE = 'delete'
+    L1_VERIFIER = 'l1_verifier'
+    L2_VERIFIER = 'l2_verifier'
+    L3_VERIFIER = 'l3_verifier'
+    LOCK = 'lock'
+    UNLOCK = 'unlock'
+
+
+class PermissionModule(enum.Enum):
+    """
+    Every page/feature in the application that needs access control.
+    Organized by domain area.
+    """
+    # --- Login & Signup Pages (Config Management) ---
+    LOGIN_PAGE_CONFIG = 'login_page_config'
+    PATIENT_LOGIN_PAGE = 'patient_login_page'
+    DOCTOR_LOGIN_PAGE = 'doctor_login_page'
+    ADMIN_LOGIN_PAGE = 'admin_login_page'
+    PATIENT_SIGNUP_PAGE = 'patient_signup_page'
+    DOCTOR_SIGNUP_PAGE = 'doctor_signup_page'
+    PHARMACY_SIGNUP_PAGE = 'pharmacy_signup_page'
+    DIAGNOSIS_SIGNUP_PAGE = 'diagnosis_signup_page'
+
+    # --- Patient Management ---
+    PATIENT_LIST = 'patient_list'
+    PATIENT_PROFILE = 'patient_profile'
+    PATIENT_PERSONAL_INFO = 'patient_personal_info'
+    PATIENT_HEALTH_RECORDS = 'patient_health_records'
+    PATIENT_INSURANCE = 'patient_insurance'
+    PATIENT_EMERGENCY_CONTACT = 'patient_emergency_contact'
+    PATIENT_HOUSE_GROUP = 'patient_house_group'
+    PATIENT_DOCUMENTS = 'patient_documents'
+    PATIENT_QUESTION_ANSWERS = 'patient_question_answers'
+
+    # --- Doctor Management ---
+    DOCTOR_LIST = 'doctor_list'
+    DOCTOR_PROFILE = 'doctor_profile'
+    DOCTOR_PERSONAL_INFO = 'doctor_personal_info'
+    DOCTOR_PROFESSIONAL_INFO = 'doctor_professional_info'
+    DOCTOR_QUALIFICATIONS = 'doctor_qualifications'
+    DOCTOR_SPECIALIZATIONS = 'doctor_specializations'
+    DOCTOR_SERVICES = 'doctor_services'
+    DOCTOR_HOSPITAL_AFFILIATIONS = 'doctor_hospital_affiliations'
+    DOCTOR_AVAILABILITY_SLOTS = 'doctor_availability_slots'
+    DOCTOR_CONSULTATION_FEE = 'doctor_consultation_fee'
+    DOCTOR_VERIFICATION = 'doctor_verification'
+    DOCTOR_QUESTIONS = 'doctor_questions'
+
+    # --- Appointment Management ---
+    APPOINTMENT_LIST = 'appointment_list'
+    APPOINTMENT_DETAILS = 'appointment_details'
+    APPOINTMENT_SCHEDULING = 'appointment_scheduling'
+    APPOINTMENT_CANCELLATION = 'appointment_cancellation'
+    APPOINTMENT_SYMPTOMS = 'appointment_symptoms'
+    APPOINTMENT_RATINGS = 'appointment_ratings'
+    APPOINTMENT_DOCUMENTS = 'appointment_documents'
+    APPOINTMENT_FOLLOW_UPS = 'appointment_follow_ups'
+
+    # --- Consultation / Chat (Doctor-Patient Query System) ---
+    CONSULTATION_LIST = 'consultation_list'
+    CONSULTATION_CHAT = 'consultation_chat'
+    CONSULTATION_ATTACHMENTS = 'consultation_attachments'
+    CONSULTATION_STATUS = 'consultation_status'
+
+    # --- Prescription Management ---
+    PRESCRIPTION_LIST = 'prescription_list'
+    PRESCRIPTION_DETAILS = 'prescription_details'
+    PRESCRIPTION_MEDICINES = 'prescription_medicines'
+
+    # --- Pharmacy Management ---
+    PHARMACY_LIST = 'pharmacy_list'
+    PHARMACY_PROFILE = 'pharmacy_profile'
+    PHARMACY_VERIFICATION = 'pharmacy_verification'
+
+    # --- Hospital Management ---
+    HOSPITAL_LIST = 'hospital_list'
+    HOSPITAL_PROFILE = 'hospital_profile'
+
+    # --- Payment & Billing ---
+    PAYMENT_LIST = 'payment_list'
+    PAYMENT_DETAILS = 'payment_details'
+    PAYMENT_REFUNDS = 'payment_refunds'
+
+    # --- Category / Specialization Master ---
+    CATEGORY_MANAGEMENT = 'category_management'
+
+    # --- Medicine Master ---
+    MEDICINE_LIST = 'medicine_list'
+    MEDICINE_BRANDS = 'medicine_brands'
+
+    # --- Symptom Master ---
+    SYMPTOM_MANAGEMENT = 'symptom_management'
+
+    # --- Questionnaire Management ---
+    QUESTIONNAIRE_BLOCKS = 'questionnaire_blocks'
+
+    # --- Admin Management ---
+    ADMIN_LIST = 'admin_list'
+    ADMIN_ROLES = 'admin_roles'
+    ADMIN_PERMISSIONS = 'admin_permissions'
+    SUB_ADMIN_MANAGEMENT = 'sub_admin_management'
+
+    # --- Approval Workflow ---
+    APPROVAL_REQUESTS = 'approval_requests'
+    APPROVAL_PROCESSING = 'approval_processing'
+
+    # --- System / Config ---
+    SYSTEM_SETTINGS = 'system_settings'
+    AUDIT_LOGS = 'audit_logs'
+    
+    # --- Reports & Analytics ---
+    REPORTS_DASHBOARD = 'reports_dashboard'
+    REPORTS_PATIENTS = 'reports_patients'
+    REPORTS_DOCTORS = 'reports_doctors'
+    REPORTS_APPOINTMENTS = 'reports_appointments'
+    REPORTS_REVENUE = 'reports_revenue'
+
+
+class DataRange(enum.Enum):
+    """
+    How far back in time the role can access data.
+    Values are the actual number of days (integer) for reliable comparison.
+    ALL = 99999 (effectively unlimited).
+    
+    Removed duplicate ranges (2_months vs 60_days were the same).
+    """
+    LAST_15_DAYS = 15
+    LAST_30_DAYS = 30
+    LAST_60_DAYS = 60
+    LAST_90_DAYS = 90
+    LAST_180_DAYS = 180
+    LAST_360_DAYS = 360
+    ALL = 99999
+
+    @property
+    def days(self):
+        """Get the number of days as integer."""
+        return self.value
+
+    @property
+    def label(self):
+        """Human-readable label for UI."""
+        labels = {
+            15: 'Last 15 Days', 30: 'Last 30 Days', 60: 'Last 60 Days',
+            90: 'Last 90 Days', 180: 'Last 180 Days', 360: 'Last 360 Days',
+            99999: 'All Time',
+        }
+        return labels.get(self.value, f'Last {self.value} Days')
+
+
+class RoleLevel(enum.Enum):
+    """Predefined role levels matching your 5-tier hierarchy."""
+    LEVEL_1 = 1  # View only (Data Analysis Team)
+    LEVEL_2 = 2  # View + Edit (Operational Team Junior) → Verified 1
+    LEVEL_3 = 3  # View + Edit + Update (Operational Team Senior) → Verified 2
+    LEVEL_4 = 4  # View + Edit + Update + Create (Senior Manager) → Verified 3
+    LEVEL_5 = 5  # Full Access including Delete
+
+
+class ApprovalRequestStatus(enum.Enum):
+    """Status of a profile change approval request."""
+    PENDING = 'pending'
+    UNDER_REVIEW = 'under_review'
+    QUERY = 'query'           # Admin asked for clarification
+    APPROVED_L1 = 'approved_l1'
+    APPROVED_L2 = 'approved_l2'
+    APPROVED_L3 = 'approved_l3'
+    COMPLETED = 'completed'
+    REJECTED = 'rejected'
+
+
+class ApprovalEntityType(enum.Enum):
+    """What entity is being modified in the approval request."""
+    DOCTOR_PROFILE = 'doctor_profile'
+    DOCTOR_QUALIFICATION = 'doctor_qualification'
+    DOCTOR_SPECIALIZATION = 'doctor_specialization'
+    DOCTOR_SERVICE = 'doctor_service'
+    DOCTOR_HOSPITAL = 'doctor_hospital'
+    DOCTOR_AVAILABILITY = 'doctor_availability'
+    DOCTOR_FEE = 'doctor_fee'
+    DOCTOR_SIGNATURE = 'doctor_signature'
+    DOCTOR_ABOUT = 'doctor_about'
+    DOCTOR_EDUCATION = 'doctor_education'
+    PATIENT_PROFILE = 'patient_profile'
+    PATIENT_INSURANCE = 'patient_insurance'
+    PHARMACY_PROFILE = 'pharmacy_profile'
+    HOSPITAL_PROFILE = 'hospital_profile'
+
+
+# ============================================================================
+# ROLE MODEL
+# ============================================================================
+
+class Role(db.Model):
+    """
+    Named role with a description. Think of this as the rows in your
+    "Roles" tab UI (Admin1, Staff, Time sheet staff, etc.)
+    
+    Each role aggregates many RolePermission entries.
+    A role can be cloned (as shown in the UI).
+    """
+    __tablename__ = 'roles'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='role_id')
+    
+    name = db.Column(db.String(200), unique=True, nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+    level = db.Column(db.Integer, nullable=True)  # 1-5 matching RoleLevel, nullable for custom roles
+    
+    is_system = db.Column(db.Boolean, default=False, nullable=False)  # System roles can't be deleted
+    is_active = db.Column(db.Boolean, default=True, nullable=False, index=True)
+    
+    created_by_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    is_deleted = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    deleted_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    permissions = db.relationship(
+        'RolePermission', 
+        back_populates='role', 
+        cascade='all, delete-orphan', 
+        lazy='dynamic'
+    )
+    sub_admin_assignments = db.relationship(
+        'SubAdminRole', 
+        back_populates='role', 
+        cascade='all, delete-orphan', 
+        lazy='dynamic'
+    )
+    created_by = db.relationship('User', foreign_keys=[created_by_id])
+
+    def has_permission(self, module, action):
+        """
+        Check if this role grants a specific action on a specific module.
+        
+        Args:
+            module: PermissionModule enum or string value
+            action: PermissionAction enum or string value
+        Returns:
+            bool (never raises — returns False on invalid input)
+        """
+        # Normalize module to enum
+        try:
+            if not isinstance(module, PermissionModule):
+                module = PermissionModule(module)
+        except (ValueError, KeyError):
+            return False  # Invalid module = denied
+        
+        # Normalize action to string key for lookup
+        action_val = action.value if isinstance(action, PermissionAction) else action
+        
+        perm = self.permissions.filter_by(module=module, is_active=True).first()
+        
+        if not perm:
+            return False
+        
+        if perm.full_access:
+            return True
+        
+        action_map = {
+            'view': perm.can_view,
+            'create': perm.can_create,
+            'edit': perm.can_edit,
+            'update': perm.can_update,
+            'delete': perm.can_delete,
+            'l1_verifier': perm.can_l1_verify,
+            'l2_verifier': perm.can_l2_verify,
+            'l3_verifier': perm.can_l3_verify,
+            'lock': perm.can_lock,
+            'unlock': perm.can_unlock,
+            'full_access': perm.full_access,
+        }
+        return action_map.get(action_val, False)
+
+    def get_data_range(self, module):
+        """Get the data range restriction for a module."""
+        try:
+            if not isinstance(module, PermissionModule):
+                module = PermissionModule(module)
+        except (ValueError, KeyError):
+            return None
+        
+        perm = self.permissions.filter_by(module=module, is_active=True).first()
+        return perm.data_range if perm else None
+
+    def clone(self, new_name, created_by_id=None):
+        """
+        Clone this role with a new name (matching the 'Clone' button in UI).
+        Returns a new unsaved Role instance.
+        """
+        new_role = Role(
+            name=new_name,
+            description=f"Cloned from: {self.name}",
+            level=self.level,
+            is_system=False,
+            created_by_id=created_by_id,
+        )
+        # Clone all permissions
+        for perm in self.permissions.filter_by(is_active=True).all():
+            new_perm = RolePermission(
+                module=perm.module,
+                full_access=perm.full_access,
+                can_view=perm.can_view,
+                can_create=perm.can_create,
+                can_edit=perm.can_edit,
+                can_update=perm.can_update,
+                can_delete=perm.can_delete,
+                can_l1_verify=perm.can_l1_verify,
+                can_l2_verify=perm.can_l2_verify,
+                can_l3_verify=perm.can_l3_verify,
+                can_lock=perm.can_lock,
+                can_unlock=perm.can_unlock,
+                data_range=perm.data_range,
+            )
+            new_role.permissions.append(new_perm)
+        return new_role
+
+    def to_dict(self, include_permissions=False):
+        data = {
+            'id': str(self.id),
+            'name': self.name,
+            'description': self.description,
+            'level': self.level,
+            'is_system': self.is_system,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_permissions:
+            data['permissions'] = [
+                p.to_dict() for p in self.permissions.filter_by(is_active=True).all()
+            ]
+        return data
+
+    def __repr__(self):
+        return f"<Role {self.name} (Level {self.level})>"
+
+
+# ============================================================================
+# ROLE PERMISSION MODEL (The Matrix)
+# ============================================================================
+
+class RolePermission(db.Model):
+    """
+    One row per (role, module) combination.
+    This is each row in your permission matrix grid:
+    
+    S.No | Particulars           | Full Access | View | Create | Edit | Delete | L1 | L2 | L3 | Lock | Unlock
+    01   | Patient Login Page    |     □       |  ☑   |   □    |  ☑   |   □    | □  | □  | □  |  □   |   □
+    02   | Doctor Profile        |     □       |  ☑   |   ☑    |  ☑   |   □    | ☑  | □  | □  |  □   |   □
+    
+    Each checkbox = one boolean column here.
+    """
+    __tablename__ = 'role_permissions'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='permission_id')
+    role_id = db.Column(UUID(as_uuid=True), db.ForeignKey('roles.role_id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # Which module/page this permission applies to
+    module = db.Column(db.Enum(PermissionModule), nullable=False, index=True)
+    
+    # --- Permission Checkboxes (matching your matrix columns) ---
+    full_access = db.Column(db.Boolean, default=False, nullable=False)
+    can_view = db.Column(db.Boolean, default=False, nullable=False)
+    can_create = db.Column(db.Boolean, default=False, nullable=False)
+    can_edit = db.Column(db.Boolean, default=False, nullable=False)      # Basic fields
+    can_update = db.Column(db.Boolean, default=False, nullable=False)    # Sensitive fields (triggers approval)
+    can_delete = db.Column(db.Boolean, default=False, nullable=False)
+    
+    # Verification level permissions
+    can_l1_verify = db.Column(db.Boolean, default=False, nullable=False)  # Verified 1
+    can_l2_verify = db.Column(db.Boolean, default=False, nullable=False)  # Verified 2
+    can_l3_verify = db.Column(db.Boolean, default=False, nullable=False)  # Verified 3
+    
+    # Account control
+    can_lock = db.Column(db.Boolean, default=False, nullable=False)
+    can_unlock = db.Column(db.Boolean, default=False, nullable=False)
+    
+    # Data range restriction (how far back can this role see data)
+    data_range = db.Column(db.Enum(DataRange), default=DataRange.ALL, nullable=False)
+    
+    # Additional field-level restrictions (optional, for fine-grained control)
+    # e.g., {"allowed_fields": ["first_name", "last_name"], "blocked_fields": ["aadhar_number"]}
+    field_restrictions = db.Column(JSON, nullable=True)
+    updated_by_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    # Relationship
+    role = db.relationship('Role', back_populates='permissions')
+    updated_by = db.relationship('User', foreign_keys=[updated_by_id])
+    __table_args__ = (
+        db.UniqueConstraint('role_id', 'module', name='uq_role_module'),
+        Index('ix_role_permissions_role_module', 'role_id', 'module'),
+    )
+
+    def validate_dependencies(self):
+        """
+        FIX #11: Validate that permission combinations are logically consistent.
+        Call this before saving. Returns (is_valid, list_of_warnings).
+        
+        Rules:
+        - edit/update/create/delete all require view
+        - update requires edit (update is for sensitive fields, edit for basic)
+        - l2_verify requires l1_verify
+        - l3_verify requires l2_verify
+        - lock/unlock require view
+        """
+        if self.full_access:
+            return True, []  # full_access implies everything
+        
+        warnings = []
+        
+        # Any write action requires view
+        if (self.can_edit or self.can_update or self.can_create or self.can_delete) and not self.can_view:
+            warnings.append("edit/update/create/delete require view permission")
+            self.can_view = True  # Auto-fix: grant view
+        
+        # update requires edit
+        if self.can_update and not self.can_edit:
+            warnings.append("update (sensitive fields) requires edit (basic fields)")
+            self.can_edit = True
+        
+        # Verification chain
+        if self.can_l2_verify and not self.can_l1_verify:
+            warnings.append("L2 verification requires L1 verification")
+            self.can_l1_verify = True
+        if self.can_l3_verify and not self.can_l2_verify:
+            warnings.append("L3 verification requires L2 verification")
+            self.can_l2_verify = True
+            if not self.can_l1_verify:
+                self.can_l1_verify = True
+        
+        # Lock/unlock require view
+        if (self.can_lock or self.can_unlock) and not self.can_view:
+            warnings.append("lock/unlock require view permission")
+            self.can_view = True
+        
+        return len(warnings) == 0, warnings
+
+    def set_full_access(self, confirmed=False):
+        """
+        FIX #12: Require explicit confirmation before granting full_access.
+        Prevents accidental UI misconfiguration.
+        
+        Usage:
+            perm.set_full_access(confirmed=True)  # Must be explicit
+        """
+        if not confirmed:
+            raise ValueError(
+                "full_access grants ALL permissions on this module. "
+                "Pass confirmed=True to confirm this is intentional."
+            )
+        self.full_access = True
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'role_id': str(self.role_id),
+            'module': self.module.value,
+            'full_access': self.full_access,
+            'can_view': self.can_view,
+            'can_create': self.can_create,
+            'can_edit': self.can_edit,
+            'can_update': self.can_update,
+            'can_delete': self.can_delete,
+            'can_l1_verify': self.can_l1_verify,
+            'can_l2_verify': self.can_l2_verify,
+            'can_l3_verify': self.can_l3_verify,
+            'can_lock': self.can_lock,
+            'can_unlock': self.can_unlock,
+            'data_range': self.data_range.name if self.data_range else None,
+            'data_range_days': self.data_range.value if self.data_range else None,
+            'data_range_label': self.data_range.label if self.data_range else None,
+            'field_restrictions': self.field_restrictions,
+        }
+
+    def __repr__(self):
+        return f"<RolePermission {self.module.value} for role {self.role_id}>"
+
+
+# ============================================================================
+# SUB-ADMIN → ROLE ASSIGNMENT
+# ============================================================================
+
+class SubAdminRole(db.Model):
+    """
+    Links an Admin user to one or more Roles.
+    An admin can have multiple roles; effective permissions = union of all roles.
+    """
+    __tablename__ = 'sub_admin_roles'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    admin_id = db.Column(UUID(as_uuid=True), db.ForeignKey('admins.admin_id', ondelete='CASCADE'), nullable=False, index=True)
+    role_id = db.Column(UUID(as_uuid=True), db.ForeignKey('roles.role_id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    assigned_by_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True)
+    assigned_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    
+    is_active = db.Column(db.Boolean, default=True, nullable=False, index=True)
+    deactivated_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    admin = db.relationship('Admin', backref=db.backref('role_assignments', lazy='dynamic', cascade='all, delete-orphan'))
+    role = db.relationship('Role', back_populates='sub_admin_assignments')
+    assigned_by = db.relationship('User', foreign_keys=[assigned_by_id])
+
+    __table_args__ = (
+        db.UniqueConstraint('admin_id', 'role_id', name='uq_admin_role'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'admin_id': str(self.admin_id),
+            'role_id': str(self.role_id),
+            'name': self.role.name if self.role else None, # Frontend expects 'name'
+            'role_name': self.role.name if self.role else None,
+            'role_level': self.role.level if self.role else None,
+            'assigned_at': self.assigned_at.isoformat() if self.assigned_at else None,
+            'is_active': self.is_active,
+        }
+
+    def __repr__(self):
+        return f"<SubAdminRole admin={self.admin_id} role={self.role_id}>"
+
+
+# ============================================================================
+# ADMIN PERMISSION OVERRIDE (Per-Admin Customization)
+# ============================================================================
+
+class OverrideType(enum.Enum):
+    """Whether the override grants or denies a permission."""
+    GRANT = 'grant'   # Add permission the role doesn't give
+    DENY = 'deny'     # Block permission even if role gives it
+
+
+class AdminPermissionOverride(db.Model):
+    """
+    Per-admin permission overrides that sit ON TOP of role-based permissions.
+    
+    Resolution order (checked by PermissionService):
+        1. Check overrides for this admin + module + action
+           - If DENY override exists  → blocked (regardless of role)
+           - If GRANT override exists → allowed (regardless of role)
+        2. If no override → fall back to role-based check
+    
+    Use cases:
+        - Temporarily grant a junior admin access to a sensitive module
+          without changing the shared role.
+        - Deny a specific admin access to patient data due to conflict
+          of interest, without removing them from the role entirely.
+        - Time-boxed permissions (expires_at) for temporary assignments.
+    
+    Audit:
+        Every override records who created it, when, why, and optionally
+        when it expires — so you always know why someone has unusual access.
+    """
+    __tablename__ = 'admin_permission_overrides'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='override_id')
+    admin_id = db.Column(UUID(as_uuid=True), db.ForeignKey('admins.admin_id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # What module and which actions are being overridden
+    module = db.Column(db.Enum(PermissionModule), nullable=False, index=True)
+    override_type = db.Column(db.Enum(OverrideType), nullable=False)  # GRANT or DENY
+    
+    # Which specific actions this override applies to (same columns as RolePermission)
+    full_access = db.Column(db.Boolean, default=False, nullable=False)
+    can_view = db.Column(db.Boolean, default=False, nullable=False)
+    can_create = db.Column(db.Boolean, default=False, nullable=False)
+    can_edit = db.Column(db.Boolean, default=False, nullable=False)
+    can_update = db.Column(db.Boolean, default=False, nullable=False)
+    can_delete = db.Column(db.Boolean, default=False, nullable=False)
+    can_l1_verify = db.Column(db.Boolean, default=False, nullable=False)
+    can_l2_verify = db.Column(db.Boolean, default=False, nullable=False)
+    can_l3_verify = db.Column(db.Boolean, default=False, nullable=False)
+    can_lock = db.Column(db.Boolean, default=False, nullable=False)
+    can_unlock = db.Column(db.Boolean, default=False, nullable=False)
+    
+    # Optional data range override
+    data_range = db.Column(db.Enum(DataRange), nullable=True)  # None = don't override range
+    
+    # Audit & lifecycle
+    reason = db.Column(db.Text, nullable=False)  # Why this override exists (mandatory for audit)
+    created_by_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True)
+    
+    is_active = db.Column(db.Boolean, default=True, nullable=False, index=True)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=True)  # Null = never expires
+    
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    deactivated_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    admin = db.relationship('Admin', backref=db.backref('permission_overrides', lazy='dynamic', cascade='all, delete-orphan'))
+    created_by = db.relationship('User', foreign_keys=[created_by_id])
+
+    __table_args__ = (
+        Index('ix_admin_overrides_admin_module', 'admin_id', 'module'),
+        Index('ix_admin_overrides_active', 'admin_id', 'is_active'),
+    )
+
+    def is_expired(self):
+        """Check if this override has expired."""
+        if not self.expires_at:
+            return False
+        
+        expiry = self.expires_at
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+            
+        return utcnow() > expiry
+
+    def is_effective(self):
+        """Check if this override is currently in effect."""
+        return self.is_active and not self.is_expired()
+
+    def get_action_value(self, action_key):
+        """Get the boolean value for a specific action."""
+        action_map = {
+            'view': self.can_view,
+            'create': self.can_create,
+            'edit': self.can_edit,
+            'update': self.can_update,
+            'delete': self.can_delete,
+            'l1_verifier': self.can_l1_verify,
+            'l2_verifier': self.can_l2_verify,
+            'l3_verifier': self.can_l3_verify,
+            'lock': self.can_lock,
+            'unlock': self.can_unlock,
+            'full_access': self.full_access,
+        }
+        return action_map.get(action_key, False)
+
+    def deactivate(self):
+        """Deactivate this override."""
+        self.is_active = False
+        self.deactivated_at = utcnow()
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'admin_id': str(self.admin_id),
+            'module': self.module.value,
+            'override_type': self.override_type.value,
+            'full_access': self.full_access,
+            'can_view': self.can_view,
+            'can_create': self.can_create,
+            'can_edit': self.can_edit,
+            'can_update': self.can_update,
+            'can_delete': self.can_delete,
+            'can_l1_verify': self.can_l1_verify,
+            'can_l2_verify': self.can_l2_verify,
+            'can_l3_verify': self.can_l3_verify,
+            'can_lock': self.can_lock,
+            'can_unlock': self.can_unlock,
+            'data_range': self.data_range.name if self.data_range else None,
+            'data_range_days': self.data_range.value if self.data_range else None,
+            'reason': self.reason,
+            'created_by_id': str(self.created_by_id) if self.created_by_id else None,
+            'is_active': self.is_active,
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+            'is_expired': self.is_expired(),
+            'is_effective': self.is_effective(),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def __repr__(self):
+        return f"<AdminPermissionOverride {self.override_type.value} {self.module.value} for admin={self.admin_id}>"
+
+
+# ============================================================================
+# APPROVAL REQUEST MODEL (Profile Change Workflow)
+# ============================================================================
+
+class ApprovalRequest(db.Model):
+    """
+    When a doctor (or patient) wants to update a sensitive profile field,
+    it creates an ApprovalRequest instead of directly modifying the record.
+    
+    Flow:
+    1. Doctor submits change → ApprovalRequest created (PENDING)
+    2. Sub-admin with appropriate level reviews
+    3. Admin can: approve (moves to next level), reject, or query (ask clarification)
+    4. Once all required levels approve → COMPLETED, changes applied
+    
+    Super admin can approve directly at any level.
+    """
+    __tablename__ = 'approval_requests'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='request_id')
+    
+    # Who is requesting the change
+    requested_by_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # What entity and record is being changed
+    entity_type = db.Column(db.Enum(ApprovalEntityType), nullable=False, index=True)
+    entity_id = db.Column(UUID(as_uuid=True), nullable=False, index=True)  # ID of the record being modified
+    
+    # What fields are being changed
+    # {"field_name": {"old_value": "...", "new_value": "..."}, ...}
+    changes = db.Column(JSON, nullable=False)
+    
+    # Attachments (e.g., updated certificates)
+    attachments = db.Column(JSON, nullable=True)  # [{"name": "...", "url": "...", "type": "..."}]
+    
+    # Reason / notes from requester
+    reason = db.Column(db.Text, nullable=True)
+    
+    # Current status
+    status = db.Column(db.Enum(ApprovalRequestStatus), default=ApprovalRequestStatus.PENDING, nullable=False)
+    
+    # Required approval level (how many levels of approval needed)
+    required_level = db.Column(db.Integer, default=1, nullable=False)  # 1, 2, or 3
+    current_level = db.Column(db.Integer, default=0, nullable=False)   # 0 = not yet approved at any level
+    
+    # Optimistic locking: prevents race conditions when multiple admins approve simultaneously.
+    # Every UPDATE must include WHERE version = <expected_version>.
+    # If another admin changed the row first, the WHERE won't match → 0 rows updated → retry.
+    version = db.Column(db.Integer, default=1, nullable=False)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    
+    # Relationships
+    requested_by = db.relationship('User', foreign_keys=[requested_by_id], backref='approval_requests')
+    actions = db.relationship('ApprovalAction', back_populates='request', cascade='all, delete-orphan', lazy='dynamic',
+                              order_by='ApprovalAction.created_at')
+
+    __table_args__ = (
+        Index('ix_approval_requests_entity', 'entity_type', 'entity_id'),
+        Index('ix_approval_requests_status', 'status', 'created_at'),
+        CheckConstraint('required_level >= 1 AND required_level <= 3', name='check_required_level_range'),
+        CheckConstraint('current_level >= 0 AND current_level <= required_level', name='check_current_level_range'),
+    )
+    
+    def approve_level(self, admin_id, comments=None):
+        """
+        Thread-safe approval using optimistic locking.
+        Returns (success: bool, error_message: str or None)
+        
+        Usage in your route:
+            success, error = approval_request.approve_level(admin_id, comments)
+            if not success:
+                db.session.rollback()
+                return jsonify({"error": error}), 409
+            db.session.commit()
+        """
+        if self.status not in (ApprovalRequestStatus.PENDING, ApprovalRequestStatus.UNDER_REVIEW,
+                               ApprovalRequestStatus.APPROVED_L1, ApprovalRequestStatus.APPROVED_L2):
+            return False, f"Cannot approve request in status: {self.status.value}"
+        
+        if self.current_level >= self.required_level:
+            return False, "All required levels already approved"
+        
+        next_level = self.current_level + 1
+        expected_version = self.version
+        
+        # Optimistic lock: only update if version hasn't changed
+        # IMPORTANT: Use .name (uppercase) — PostgreSQL enum stores the member name, not the value
+        new_status_value = (
+            ApprovalRequestStatus.COMPLETED.name
+            if next_level >= self.required_level
+            else f'APPROVED_L{next_level}'
+        )
+        result = db.session.execute(
+            db.text("""
+                UPDATE approval_requests 
+                SET current_level = :next_level,
+                    version = version + 1,
+                    status = CAST(:new_status AS approvalrequeststatus),
+                    updated_at = :now,
+                    completed_at = CASE WHEN :next_level >= required_level THEN :now ELSE NULL END
+                WHERE request_id = :request_id 
+                AND version = :expected_version
+            """),
+            {
+                'next_level': next_level,
+                'new_status': new_status_value,
+                'now': utcnow(),
+                'request_id': self.id,
+                'expected_version': expected_version,
+            }
+        )
+        
+        if result.rowcount == 0:
+            return False, "Concurrent modification detected. Another admin may have already acted on this request. Please refresh."
+        
+        # Create the audit action
+        action = ApprovalAction(
+            request_id=self.id,
+            admin_id=admin_id,
+            action=ApprovalActionType.APPROVE,
+            level=next_level,
+            comments=comments,
+        )
+        db.session.add(action)
+        
+        # Refresh the instance to reflect DB changes
+        db.session.refresh(self)
+        return True, None
+
+    def to_dict(self, include_actions=False):
+        # Resolve the requester's display name
+        requester_name = None
+        if self.requested_by:
+            user = self.requested_by
+            # Try doctor profile first
+            if hasattr(user, 'doctor_profile') and user.doctor_profile:
+                requester_name = user.doctor_profile.full_name
+            elif user.first_name or user.last_name:
+                requester_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+
+        data = {
+            'id': str(self.id),
+            'requested_by_id': str(self.requested_by_id),
+            'requested_by_name': requester_name,
+            'entity_type': self.entity_type.value,
+            'entity_id': str(self.entity_id),
+            'changes': self.changes,
+            'attachments': self.attachments,
+            'reason': self.reason,
+            'status': self.status.value,
+            'required_level': self.required_level,
+            'current_level': self.current_level,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }
+        if include_actions:
+            data['actions'] = [a.to_dict() for a in self.actions.all()]
+        return data
+
+    def __repr__(self):
+        return f"<ApprovalRequest {self.id} [{self.status.value}]>"
+
+
+class ApprovalActionType(enum.Enum):
+    """Actions that can be taken on an approval request."""
+    APPROVE = 'approve'
+    REJECT = 'reject'
+    QUERY = 'query'       # Admin asks for clarification
+    RESPOND = 'respond'   # Requester responds to query
+    ESCALATE = 'escalate' # Forward to higher level
+    CANCEL = 'cancel'     # Requester withdraws
+
+
+class ApprovalAction(db.Model):
+    """
+    Each review action taken on an ApprovalRequest.
+    Creates an audit trail of who approved/rejected/queried at each level.
+    """
+    __tablename__ = 'approval_actions'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='action_id')
+    request_id = db.Column(UUID(as_uuid=True), db.ForeignKey('approval_requests.request_id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # Who took the action
+    admin_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True, index=True)
+    
+    # What action was taken
+    action = db.Column(db.Enum(ApprovalActionType), nullable=False)
+    level = db.Column(db.Integer, nullable=False)  # Which approval level (1, 2, 3)
+    
+    comments = db.Column(db.Text, nullable=True)
+    attachments = db.Column(JSON, nullable=True)
+    
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+
+    # Relationships
+    request = db.relationship('ApprovalRequest', back_populates='actions')
+    admin = db.relationship('User', foreign_keys=[admin_id])
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'request_id': str(self.request_id),
+            'admin_id': str(self.admin_id) if self.admin_id else None,
+            'admin_name': (self.admin.admin_profile.full_name 
+                          if self.admin and self.admin.admin_profile else 'System'),
+            'action': self.action.value if self.action else None,
+            'level': self.level,
+            'comments': self.comments,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def __repr__(self):
+        return f"<ApprovalAction {self.action} L{self.level} on {self.request_id}>"
+
+
+# ============================================================================
+# CONSULTATION / DOCTOR-PATIENT CHAT MODEL
+# ============================================================================
+
+class ConsultationStatus(enum.Enum):
+    """Status of a doctor-patient text consultation."""
+    PENDING = 'pending'          # Patient submitted query
+    ASSIGNED = 'assigned'        # Assigned to doctor
+    IN_PROGRESS = 'in_progress'  # Doctor is reviewing/chatting
+    QUERY_RAISED = 'query_raised'  # Doctor asked reverse query
+    PATIENT_RESPONDED = 'patient_responded'  # Patient answered the query
+    COMPLETED = 'completed'
+    CANCELLED = 'cancelled'
+
+
+class Consultation(db.Model):
+    """
+    Doctor-Patient text-based consultation (not video call).
+    Patient asks query → Doctor reviews → may ask reverse query → answers → closes.
+    """
+    __tablename__ = 'consultations'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='consultation_id')
+    
+    patient_id = db.Column(UUID(as_uuid=True), db.ForeignKey('patients.patient_id', ondelete='CASCADE'), nullable=False, index=True)
+    doctor_id = db.Column(UUID(as_uuid=True), db.ForeignKey('doctors.doctor_id', ondelete='CASCADE'), nullable=False, index=True)
+    appointment_id = db.Column(UUID(as_uuid=True), db.ForeignKey('appointments.appointment_id'), nullable=True, index=True)
+    
+    # Initial query
+    subject = db.Column(db.String(500), nullable=True)
+    initial_query = db.Column(db.Text, nullable=False)
+    
+    status = db.Column(db.Enum(ConsultationStatus), default=ConsultationStatus.PENDING, nullable=False, index=True)
+    
+    # Fee
+    consultation_fee = db.Column(db.Numeric(10, 2), nullable=True)
+    is_paid = db.Column(db.Boolean, default=False, nullable=False)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    closed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    
+    is_deleted = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    deleted_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    patient = db.relationship('Patient', backref=db.backref('consultations', lazy='dynamic'))
+    doctor = db.relationship('Doctor', backref=db.backref('consultations', lazy='dynamic'))
+    appointment = db.relationship('Appointment', backref=db.backref('consultation', uselist=False))
+    messages = db.relationship('ConsultationMessage', back_populates='consultation', cascade='all, delete-orphan',
+                               lazy='dynamic', order_by='ConsultationMessage.created_at')
+
+    __table_args__ = (
+        Index('ix_consultations_patient_status', 'patient_id', 'status'),
+        Index('ix_consultations_doctor_status', 'doctor_id', 'status'),
+    )
+
+    def to_dict(self, include_messages=False):
+        data = {
+            'id': str(self.id),
+            'patient_id': str(self.patient_id),
+            'doctor_id': str(self.doctor_id),
+            'subject': self.subject,
+            'initial_query': self.initial_query,
+            'status': self.status.value,
+            'consultation_fee': str(self.consultation_fee) if self.consultation_fee else None,
+            'is_paid': self.is_paid,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'closed_at': self.closed_at.isoformat() if self.closed_at else None,
+        }
+        if include_messages:
+            data['messages'] = [m.to_dict() for m in self.messages.all()]
+        return data
+
+    def __repr__(self):
+        return f"<Consultation {self.id} [{self.status.value}]>"
+
+
+class ConsultationMessage(db.Model):
+    """
+    Individual messages in a consultation chat.
+    Both doctor and patient can send messages and attachments.
+    """
+    __tablename__ = 'consultation_messages'
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, name='message_id')
+    consultation_id = db.Column(UUID(as_uuid=True), db.ForeignKey('consultations.consultation_id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    sender_id = db.Column(UUID(as_uuid=True), db.ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True, index=True)
+    sender_role = db.Column(db.String(20), nullable=False)  # 'patient', 'doctor', 'system'
+    
+    message_text = db.Column(db.Text, nullable=True)
+    
+    # Attachments: [{"name": "report.pdf", "url": "s3://...", "type": "application/pdf", "size": 1024}]
+    attachments = db.Column(JSON, nullable=True)
+    
+    # Is this a reverse query from doctor?
+    is_query = db.Column(db.Boolean, default=False, nullable=False)
+    
+    # Read status
+    is_read = db.Column(db.Boolean, default=False, nullable=False)
+    read_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+
+    # Relationships
+    consultation = db.relationship('Consultation', back_populates='messages')
+    sender = db.relationship('User', foreign_keys=[sender_id])
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'consultation_id': str(self.consultation_id),
+            'sender_id': str(self.sender_id) if self.sender_id else None,
+            'sender_role': self.sender_role,
+            'message_text': self.message_text,
+            'attachments': self.attachments,
+            'is_query': self.is_query,
+            'is_read': self.is_read,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def __repr__(self):
+        return f"<ConsultationMessage {self.id} by {self.sender_role}>"
+
+
+# ============================================================================
+# PERMISSION HELPER SERVICE
+# ============================================================================
+
+class PermissionService:
+    """
+    Service class for checking permissions.
+    
+    Resolution order:
+        1. Super admin → always True
+        2. DENY overrides → if active DENY override exists for this admin+module+action → False
+        3. GRANT overrides → if active GRANT override exists → True
+        4. Role-based check → union of all assigned roles
+    
+    DENY always wins over GRANT. This means:
+        - If a role gives VIEW on patient_list, but a DENY override blocks VIEW → blocked
+        - If no role gives DELETE on patient_list, but a GRANT override adds DELETE → allowed
+        - If both GRANT and DENY overrides exist for the same action → DENY wins
+    
+    Usage:
+        if not PermissionService.check(admin, PermissionModule.DOCTOR_PROFILE, PermissionAction.EDIT):
+            return jsonify({"error": "Permission denied"}), 403
+        
+        date_filter = PermissionService.get_date_filter(admin, PermissionModule.PATIENT_LIST)
+    """
+
+    # Map PermissionAction enum values to the boolean column names
+    _ACTION_TO_COLUMN = {
+        'view': 'can_view',
+        'create': 'can_create',
+        'edit': 'can_edit',
+        'update': 'can_update',
+        'delete': 'can_delete',
+        'l1_verifier': 'can_l1_verify',
+        'l2_verifier': 'can_l2_verify',
+        'l3_verifier': 'can_l3_verify',
+        'lock': 'can_lock',
+        'unlock': 'can_unlock',
+        'full_access': 'full_access',
+    }
+
+    @staticmethod
+    def _get_active_overrides(admin, module):
+        """
+        Get all active, non-expired overrides for an admin on a specific module.
+        Returns (deny_overrides, grant_overrides) lists.
+        """
+        overrides = admin.permission_overrides.filter_by(
+            module=module,
+            is_active=True,
+        ).all()
+        
+        deny = []
+        grant = []
+        for ov in overrides:
+            if ov.is_expired():
+                continue  # Skip expired overrides (cleanup can happen async)
+            if ov.override_type == OverrideType.DENY:
+                deny.append(ov)
+            elif ov.override_type == OverrideType.GRANT:
+                grant.append(ov)
+        
+        return deny, grant
+
+    @staticmethod
+    def check(admin, module, action):
+        """
+        Check if an admin has permission for a specific module + action.
+        
+        Resolution: Super Admin → DENY override → GRANT override → Role check
+        
+        Args:
+            admin: Admin model instance
+            module: PermissionModule enum
+            action: PermissionAction enum
+        Returns:
+            bool
+        """
+        from model import UserRole
+
+        # 1. Super admins bypass everything
+        if admin.user and admin.user.role == UserRole.SUPER_ADMIN:
+            return True
+
+        action_val = action.value if hasattr(action, 'value') else action
+        col_name = PermissionService._ACTION_TO_COLUMN.get(action_val)
+        if not col_name:
+            return False
+
+        # 2. Check per-admin overrides (DENY wins over GRANT)
+        deny_overrides, grant_overrides = PermissionService._get_active_overrides(admin, module)
+
+        # DENY check: if any active deny override blocks this action → False
+        for ov in deny_overrides:
+            if getattr(ov, col_name, False) or ov.full_access:
+                return False
+
+        # GRANT check: if any active grant override allows this action → True
+        for ov in grant_overrides:
+            if getattr(ov, col_name, False) or ov.full_access:
+                return True
+
+        # 3. Fall back to role-based check
+        for assignment in admin.role_assignments.filter_by(is_active=True).all():
+            if assignment.role and assignment.role.is_active and not assignment.role.is_deleted:
+                if assignment.role.has_permission(module, action):
+                    return True
+
+        return False
+
+    @staticmethod
+    def get_effective_permissions(admin):
+        """
+        Get the merged/effective permissions for an admin across all assigned roles,
+        WITH overrides applied on top.
+        
+        Returns a dict:
+        {
+            module_value: {
+                'can_view': bool, 'can_edit': bool, ...,
+                'data_range': str,
+                'overrides': {          # Extra info for UI display
+                    'has_grants': bool,
+                    'has_denies': bool,
+                    'grant_details': [...],
+                    'deny_details': [...],
+                }
+            },
+            ...
+        }
+        """
+        from model import UserRole
+
+        effective = {}
+
+        if admin.user and admin.user.role == UserRole.SUPER_ADMIN:
+            for mod in PermissionModule:
+                effective[mod.value] = {
+                    'full_access': True,
+                    'can_view': True, 'can_create': True, 'can_edit': True,
+                    'can_update': True, 'can_delete': True,
+                    'can_l1_verify': True, 'can_l2_verify': True, 'can_l3_verify': True,
+                    'can_lock': True, 'can_unlock': True,
+                    'data_range': DataRange.ALL,
+                    'data_range_label': 'All Time',
+                    'source': 'super_admin',
+                    'overrides': {'has_grants': False, 'has_denies': False},
+                }
+            return effective
+
+        # Step 1: Build base from roles (union)
+        for assignment in admin.role_assignments.filter_by(is_active=True).all():
+            if not assignment.role or not assignment.role.is_active:
+                continue
+            for perm in assignment.role.permissions.filter_by(is_active=True).all():
+                mod_key = perm.module.value
+                if mod_key not in effective:
+                    effective[mod_key] = {
+                        'full_access': False,
+                        'can_view': False, 'can_create': False, 'can_edit': False,
+                        'can_update': False, 'can_delete': False,
+                        'can_l1_verify': False, 'can_l2_verify': False, 'can_l3_verify': False,
+                        'can_lock': False, 'can_unlock': False,
+                        'data_range': perm.data_range if perm.data_range else DataRange.ALL,
+                        'data_range_label': perm.data_range.label if perm.data_range else 'All Time',
+                        'source': 'role',
+                        'overrides': {'has_grants': False, 'has_denies': False,
+                                      'grant_details': [], 'deny_details': []},
+                    }
+                ex = effective[mod_key]
+                ex['full_access'] = ex['full_access'] or perm.full_access
+                for col in ('can_view', 'can_create', 'can_edit', 'can_update', 'can_delete',
+                            'can_l1_verify', 'can_l2_verify', 'can_l3_verify', 'can_lock', 'can_unlock'):
+                    ex[col] = ex[col] or getattr(perm, col, False) or perm.full_access
+                ex['data_range'] = PermissionService._wider_range(
+                    ex['data_range'],
+                    perm.data_range if perm.data_range else DataRange.ALL
+                )
+                ex['data_range_label'] = ex['data_range'].label if isinstance(ex['data_range'], DataRange) else 'All Time'
+
+        # Step 2: Apply overrides on top
+        all_overrides = admin.permission_overrides.filter_by(is_active=True).all()
+        for ov in all_overrides:
+            if ov.is_expired():
+                continue
+
+            mod_key = ov.module.value
+
+            # Ensure module entry exists (override might target a module the role doesn't cover)
+            if mod_key not in effective:
+                effective[mod_key] = {
+                    'full_access': False,
+                    'can_view': False, 'can_create': False, 'can_edit': False,
+                    'can_update': False, 'can_delete': False,
+                    'can_l1_verify': False, 'can_l2_verify': False, 'can_l3_verify': False,
+                    'can_lock': False, 'can_unlock': False,
+                    'data_range': DataRange.ALL,
+                    'data_range_label': 'All Time',
+                    'source': 'override',
+                    'overrides': {'has_grants': False, 'has_denies': False,
+                                  'grant_details': [], 'deny_details': []},
+                }
+
+            ex = effective[mod_key]
+            ov_summary = {
+                'id': str(ov.id),
+                'reason': ov.reason,
+                'expires_at': ov.expires_at.isoformat() if ov.expires_at else None,
+            }
+
+            if ov.override_type == OverrideType.GRANT:
+                ex['overrides']['has_grants'] = True
+                ex['overrides'].setdefault('grant_details', []).append(ov_summary)
+                # Apply grants
+                for col in ('full_access', 'can_view', 'can_create', 'can_edit', 'can_update',
+                            'can_delete', 'can_l1_verify', 'can_l2_verify', 'can_l3_verify',
+                            'can_lock', 'can_unlock'):
+                    if getattr(ov, col, False):
+                        ex[col] = True
+                # Override data range if specified
+                if ov.data_range:
+                    ex['data_range'] = PermissionService._wider_range(
+                        ex['data_range'], ov.data_range
+                    )
+                    ex['data_range_label'] = ex['data_range'].label if isinstance(ex['data_range'], DataRange) else 'All Time'
+
+            elif ov.override_type == OverrideType.DENY:
+                ex['overrides']['has_denies'] = True
+                ex['overrides'].setdefault('deny_details', []).append(ov_summary)
+                # Apply denies (DENY wins — force to False)
+                for col in ('full_access', 'can_view', 'can_create', 'can_edit', 'can_update',
+                            'can_delete', 'can_l1_verify', 'can_l2_verify', 'can_l3_verify',
+                            'can_lock', 'can_unlock'):
+                    if getattr(ov, col, False):
+                        ex[col] = False
+
+        return effective
+
+    @staticmethod
+    def get_date_filter(admin, module):
+        """
+        Get the earliest date this admin can access data for a module.
+        Considers both role data ranges and override data ranges.
+        Returns a datetime or None (no restriction).
+        """
+        from model import UserRole
+
+        if admin.user and admin.user.role == UserRole.SUPER_ADMIN:
+            return None
+
+        widest_range = None
+
+        # From roles
+        for assignment in admin.role_assignments.filter_by(is_active=True).all():
+            if not assignment.role or not assignment.role.is_active:
+                continue
+            dr = assignment.role.get_data_range(module)
+            if dr:
+                widest_range = PermissionService._wider_range(widest_range, dr)
+
+        # From overrides (GRANT overrides can widen the range)
+        _, grant_overrides = PermissionService._get_active_overrides(admin, module)
+        for ov in grant_overrides:
+            if ov.data_range:
+                widest_range = PermissionService._wider_range(widest_range, ov.data_range)
+
+        return PermissionService._range_to_date(widest_range)
+
+    @staticmethod
+    def get_override_summary(admin):
+        """
+        Get a summary of all active overrides for an admin.
+        Useful for the admin detail/edit page in UI.
+        """
+        overrides = admin.permission_overrides.filter_by(is_active=True).all()
+        active = [ov.to_dict() for ov in overrides if ov.is_effective()]
+        expired = [ov.to_dict() for ov in overrides if ov.is_expired()]
+        return {
+            'active_count': len(active),
+            'expired_count': len(expired),
+            'active': active,
+            'expired': expired,
+        }
+
+    @staticmethod
+    def _wider_range(range_a, range_b):
+        """
+        Compare two DataRange values and return the wider one.
+        Now uses integer comparison (DataRange values are day counts).
+        Accepts DataRange enum instances or integer values.
+        """
+        if range_a is None:
+            return range_b
+        if range_b is None:
+            return range_a
+        
+        # Normalize to integer days
+        days_a = range_a.value if isinstance(range_a, DataRange) else (range_a if isinstance(range_a, int) else DataRange.ALL.value)
+        days_b = range_b.value if isinstance(range_b, DataRange) else (range_b if isinstance(range_b, int) else DataRange.ALL.value)
+        
+        return range_a if days_a >= days_b else range_b
+
+    @staticmethod
+    def _range_to_date(range_value):
+        """
+        Convert a DataRange to a cutoff datetime.
+        Now works directly with integer day values.
+        Returns None for ALL (no restriction).
+        """
+        from datetime import timedelta
+
+        if range_value is None:
+            return None
+        
+        # Get days as integer
+        if isinstance(range_value, DataRange):
+            days = range_value.value
+        elif isinstance(range_value, int):
+            days = range_value
+        else:
+            return None  # Unknown type
+        
+        if days >= 99999:  # ALL
+            return None
+        
+        return utcnow() - timedelta(days=days)
+
+
+# ============================================================================
+# SEED DATA HELPER
+# ============================================================================
+
+def seed_default_roles():
+    """
+    Create the 5 default role levels if they don't exist.
+    Call this in your app initialization or migration script.
+    """
+    defaults = [
+        {
+            'name': 'Data Analysis Team',
+            'description': 'Level 1 – View-only access for data analysis',
+            'level': 1,
+            'is_system': True,
+            'actions': {'can_view': True},
+        },
+        {
+            'name': 'Operational Team Junior',
+            'description': 'Level 2 – View + Edit basic fields, L1 verification',
+            'level': 2,
+            'is_system': True,
+            'actions': {'can_view': True, 'can_edit': True, 'can_l1_verify': True},
+        },
+        {
+            'name': 'Operational Team Senior',
+            'description': 'Level 3 – View + Edit + Update sensitive fields, L2 verification',
+            'level': 3,
+            'is_system': True,
+            'actions': {'can_view': True, 'can_edit': True, 'can_update': True, 'can_l2_verify': True},
+        },
+        {
+            'name': 'Senior Manager',
+            'description': 'Level 4 – View + Edit + Update + Create, L3 verification',
+            'level': 4,
+            'is_system': True,
+            'actions': {'can_view': True, 'can_edit': True, 'can_update': True, 'can_create': True, 'can_l3_verify': True},
+        },
+        {
+            'name': 'Full Access Admin',
+            'description': 'Level 5 – Full access including delete',
+            'level': 5,
+            'is_system': True,
+            'actions': {'full_access': True},
+        },
+    ]
+    
+    created_roles = []
+    for role_data in defaults:
+        existing = Role.query.filter_by(name=role_data['name']).first()
+        if existing:
+            created_roles.append(existing)
+            continue
+        
+        role = Role(
+            name=role_data['name'],
+            description=role_data['description'],
+            level=role_data['level'],
+            is_system=role_data['is_system'],
+        )
+        db.session.add(role)
+        db.session.flush()  # Get the ID
+        
+        # Create permissions for ALL modules with the level's default actions
+        actions = role_data['actions']
+        for module in PermissionModule:
+            perm = RolePermission(
+                role_id=role.id,
+                module=module,
+                full_access=actions.get('full_access', False),
+                can_view=actions.get('can_view', False),
+                can_create=actions.get('can_create', False),
+                can_edit=actions.get('can_edit', False),
+                can_update=actions.get('can_update', False),
+                can_delete=actions.get('can_delete', False),
+                can_l1_verify=actions.get('can_l1_verify', False),
+                can_l2_verify=actions.get('can_l2_verify', False),
+                can_l3_verify=actions.get('can_l3_verify', False),
+                can_lock=actions.get('can_lock', False),
+                can_unlock=actions.get('can_unlock', False),
+                data_range=DataRange.ALL,
+            )
+            db.session.add(perm)
+        
+        created_roles.append(role)
+    
+    db.session.commit()
+    return created_roles
+
+

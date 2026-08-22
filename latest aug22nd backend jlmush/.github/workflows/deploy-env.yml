@@ -1,0 +1,192 @@
+name: deploy-env
+
+# Reusable deploy — the single source of truth for HOW a backend deploy
+# works. Called by:
+#   deploy.yml       -> test EC2, image tag "main" (auto, every merge)
+#   deploy-prod.yml  -> prod EC2, image tag = an exact commit SHA (promotion)
+#
+# Flow (unchanged from the original deploy.yml):
+#   SSH into EC2 → docker login → prune disk → pull images → stop old
+#   containers → start redis → wait for redis → run migrations → start
+#   backend → health check (5 retries × 3s) → prune → done
+#
+# Prerequisites (one-time per EC2 box):
+#   - Docker installed, SSH user in docker group
+#   - /opt/jlmush/.env.production with all runtime secrets (chmod 600)
+#   - Deploy SSH public key in ~/.ssh/authorized_keys — its own keypair
+#     per environment, NOT the EC2 launch key
+#   - Security group: inbound 22 (SSH) + 80/443 (Caddy terminates TLS on
+#     the box; 80 is required for the ACME HTTP-01 challenge). Gunicorn's
+#     5000 stays private — Caddy reaches it on 127.0.0.1 and the health
+#     check below runs on localhost inside this SSH session, so exposing
+#     it would only serve the API in plaintext beside the TLS listener.
+
+on:
+  workflow_call:
+    inputs:
+      gh_environment:
+        description: GitHub environment to run under (testing / production)
+        required: true
+        type: string
+      image_tag:
+        description: Image tag suffix to deploy — "main" or a commit SHA
+        required: true
+        type: string
+    # No `secrets:` block on purpose. The box credentials are NOT passed
+    # in — they are read below from the GitHub environment this job
+    # attaches to, so `production`'s SSH key exists only inside that
+    # environment and never as a repository-level secret that any
+    # workflow (or any action it calls) could read.
+    #
+    # Callers use `secrets: inherit`, which carries the genuinely shared
+    # repo-level ones (DOCKERHUB_*). Environment secrets win over
+    # repo-level secrets of the same name, so EC2_HOST/USER/SSH_KEY
+    # resolve per environment with ONE name each — which is why there is
+    # no TEST_ prefix anywhere any more.
+
+jobs:
+  deploy:
+    name: deploy backend-${{ inputs.image_tag }} to ${{ inputs.gh_environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.gh_environment }}
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,IMAGE_TAG
+          command_timeout: 5m
+          # ``set -e`` at the top of the script aborts on any non-zero
+          # exit. (The legacy ``script_stop: true`` flag is no longer a
+          # valid input on appleboy/ssh-action@v1; ``set -e`` does the
+          # same job and stays portable.)
+          script: |
+            set -e
+            IMAGE_REPO="${DOCKERHUB_USERNAME}/jlmush"
+            ENV_FILE="/opt/jlmush/.env.production"
+
+            echo "========================================="
+            echo "  jlmush deploy — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "  tag: ${IMAGE_TAG}"
+            echo "========================================="
+
+            # ── Login to DockerHub (private repo) ──────────────
+            echo "=== Docker login ==="
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+            # ── Reclaim disk BEFORE pulling ────────────────────
+            # Every deploy pulls fresh layers, which orphans the previous
+            # image's layers (they become dangling <none> images). Left
+            # unpruned they pile up until an extract fails with "no space
+            # left on device" mid-pull — so the cleanup MUST run before the
+            # pull, not only after. Prune only dangling images + stopped
+            # containers + build cache; images in use by the running
+            # containers are tagged and stay untouched.
+            # ``|| true`` so a cleanup hiccup never aborts the deploy.
+            echo "=== Reclaiming disk (pre-pull) ==="
+            df -h / | tail -1
+            docker image prune -f || true
+            docker container prune -f || true
+            docker builder prune -f || true
+            df -h / | tail -1
+
+            # ── Pull images ────────────────────────────────────
+            echo "=== Pulling images (tag: ${IMAGE_TAG}) ==="
+            docker pull "$IMAGE_REPO:backend-${IMAGE_TAG}"
+            docker pull "$IMAGE_REPO:redis-${IMAGE_TAG}"
+
+            # ── Stop and remove old containers ─────────────────
+            echo "=== Stopping old containers ==="
+            docker stop jlmush-backend jlmush-redis 2>/dev/null || true
+            docker rm jlmush-backend jlmush-redis 2>/dev/null || true
+
+            # ── Ensure network exists ──────────────────────────
+            docker network create jlmush-net 2>/dev/null || true
+
+            # ── Start Redis ────────────────────────────────────
+            # Named volume persists data across container restarts.
+            # Redis port is NOT exposed to the host — internal only.
+            echo "=== Starting Redis ==="
+            docker run -d --name jlmush-redis \
+              --network jlmush-net \
+              --restart unless-stopped \
+              -v jlmush-redis-data:/data \
+              --env-file "$ENV_FILE" \
+              "$IMAGE_REPO:redis-${IMAGE_TAG}"
+
+            # Wait for Redis to initialize
+            echo "=== Waiting for Redis ==="
+            sleep 3
+            REDIS_PW=$(grep '^REDIS_PASSWORD=' "$ENV_FILE" | cut -d= -f2)
+            docker exec jlmush-redis redis-cli -a "$REDIS_PW" PING
+
+            # ── Apply schema migrations ────────────────────────
+            # ``scripts/migrate.py`` is the single migration entrypoint.
+            # On first deploy (no alembic_version table) it bootstraps
+            # via db.create_all() + stamp head. On subsequent deploys
+            # it runs ``flask db upgrade`` which applies every migration
+            # committed since the last release. Idempotent — safe to
+            # re-run on the same DB without side-effects.
+            echo "=== Applying schema migrations ==="
+            docker run --rm \
+              --network jlmush-net \
+              --env-file "$ENV_FILE" \
+              --entrypoint python \
+              "$IMAGE_REPO:backend-${IMAGE_TAG}" \
+              scripts/migrate.py
+
+            # ── Start Backend ──────────────────────────────────
+            # Port 5000 is mapped to the host for external access.
+            echo "=== Starting Backend ==="
+            docker run -d --name jlmush-backend \
+              --network jlmush-net \
+              --restart unless-stopped \
+              -p 5000:5000 \
+              --env-file "$ENV_FILE" \
+              "$IMAGE_REPO:backend-${IMAGE_TAG}"
+
+            # ── Health check ───────────────────────────────────
+            # Retries 5 times with 3-second intervals.
+            # The health endpoint checks Redis connectivity through
+            # the backend. DB health is implicitly verified because
+            # create_app() in production mode runs SELECT 1 — if DB
+            # is unreachable, gunicorn workers crash and this curl fails.
+            echo "=== Health check ==="
+            for i in 1 2 3 4 5; do
+              sleep 3
+              if curl -sf http://localhost:5000/internal/auth-health > /dev/null; then
+                echo "[OK] Backend is healthy (attempt $i)"
+                # ── Prune the images the new deploy just replaced ──
+                # Old containers were already removed above, so the previous
+                # backend/redis images are dangling — reclaim them so orphans
+                # never build up between deploys. Runs only after a healthy
+                # deploy.
+                echo "=== Pruning orphaned images (post-deploy) ==="
+                docker image prune -f || true
+                df -h / | tail -1
+                echo ""
+                echo "========================================="
+                echo "  Deploy successful!"
+                echo "  Backend: $IMAGE_REPO:backend-${IMAGE_TAG}"
+                echo "  Redis:   $IMAGE_REPO:redis-${IMAGE_TAG}"
+                echo "========================================="
+                docker logout
+                exit 0
+              fi
+              echo "Waiting for backend... (attempt $i/5)"
+            done
+
+            # If we got here, health check failed
+            echo ""
+            echo "[FAIL] Health check failed after 5 attempts"
+            echo "=== Backend container logs (last 50 lines) ==="
+            docker logs jlmush-backend --tail 50
+            docker logout
+            exit 1

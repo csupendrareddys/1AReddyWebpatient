@@ -1,0 +1,58 @@
+name: deploy-prod
+
+# PRODUCTION promotion — deploys an EXACT image that already ran on test.
+#
+# release.yml tags every main build with the commit SHA
+# (backend-<sha> / redis-<sha>), so promotion is a re-deploy of the same
+# immutable artifact — never a rebuild. To promote:
+#
+#   1. Verify the change on the test environment.
+#   2. Actions → deploy-prod → Run workflow → paste the full 40-char commit
+#      SHA of the tested main commit (git rev-parse HEAD, or copy it from
+#      the release run).
+#   3. Approve the "production" environment gate (Settings → Environments →
+#      production → required reviewers must be configured once).
+#
+# Migrations run as part of the deploy (same migrate.py gate as test).
+#
+# Required secrets:
+#   ENVIRONMENT `production` -> EC2_HOST, EC2_USER, EC2_SSH_KEY (the prod box)
+#   REPOSITORY               -> DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+#
+# The production box credentials live ONLY in the `production`
+# environment, behind its required reviewer — not at repository level,
+# where every workflow in the repo (and every third-party action they
+# call) could read them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA to promote (must have a release build)
+        required: true
+        type: string
+
+jobs:
+  guard:
+    name: validate input
+    runs-on: ubuntu-latest
+    steps:
+      - name: SHA looks like a full commit hash
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          if ! echo "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::'$SHA' is not a full 40-character commit SHA. Short SHAs won't match the image tags release.yml pushed."
+            exit 1
+          fi
+
+  deploy-production:
+    name: promote to production EC2
+    needs: guard
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      gh_environment: production
+      image_tag: ${{ inputs.sha }}
+    # Carries the repo-level DOCKERHUB_* through; EC2_* come from the
+    # `production` environment inside deploy-env.yml.
+    secrets: inherit

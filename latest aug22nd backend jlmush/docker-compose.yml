@@ -1,0 +1,183 @@
+# ────────────────────────────────────────────────────────────────
+# LOCAL DEV stack for the jlmush backend.
+#
+#   postgres  — PostgreSQL 16, data persisted in a named volume
+#   redis     — password-protected Redis 7 (built from Dockerfile.redis)
+#   backend   — the Flask/Gunicorn API (built from Dockerfile)
+#
+# The backend source is bind-mounted over the image's baked copy so
+# code edits are picked up by `docker compose exec backend python …`
+# WITHOUT a rebuild. (Gunicorn itself won't hot-reload the running
+# server, but the CLI seed/bootstrap scripts we exec always import the
+# live mounted code.)
+#
+# Usage:
+#   docker compose up -d --build
+#   docker compose exec backend python scripts/migrate.py
+#   docker compose exec backend python scripts/bootstrap_local.py
+#   docker compose exec backend python scripts/seed_platform_users.py
+# ────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jlmush-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: jlmush_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # PROD storage target: 20 GB. Docker Desktop's `local` volume driver
+    # can't hard-cap a named volume's size, so this is enforced at the
+    # EBS/infra layer in prod, not here. RAM/CPU for the DB were left
+    # unspecified, so no cgroup cap is applied to postgres.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d jlmush_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    build:
+      context: .
+      dockerfile: Dockerfile.redis
+    container_name: jlmush-redis
+    environment:
+      REDIS_PASSWORD: devpassword
+      # AUTH redis: sessions, refresh tokens, OTPs, locks. Entrypoint
+      # defaults apply — noeviction + AOF: memory pressure fails writes
+      # loudly instead of silently evicting live sessions.
+      # In prod, redis is co-located inside the backend EC2 with ~500 MB.
+      # Container is hard-capped at 512M below; maxmemory is set under that
+      # (384mb) to leave headroom for redis overhead + AOF buffers.
+      REDIS_MAXMEMORY: 384mb
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    # Force the ~500 MB prod allocation onto the local container.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # CACHE redis — the disposable side. Rate-limit counters, Socket.IO
+  # message queue, and any future response/data caches (CACHE_REDIS_URL).
+  # allkeys-lru + no AOF: everything here is reconstructible, so eviction
+  # is correct — and a cache overload can never evict a session, because
+  # sessions live in the OTHER instance. If this container dies, rate
+  # limiting briefly fails open and live events fall back to REST polling.
+  redis-cache:
+    build:
+      context: .
+      dockerfile: Dockerfile.redis
+    container_name: jlmush-redis-cache
+    environment:
+      REDIS_PASSWORD: devpassword
+      REDIS_MAXMEMORY: 192mb
+      REDIS_MAXMEMORY_POLICY: allkeys-lru
+      REDIS_APPENDONLY: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jlmush-backend
+    env_file:
+      - .env
+    environment:
+      # The managed DNS zone that <slug>.<zone> tenant subdomains resolve
+      # under. Host resolution needs it explicitly: it used to be inferred
+      # from the default tenant's own domain, which only worked while that
+      # tenant was the apex AND owned the zone. After the vendor/customer
+      # split the default tenant is the vendor, whose domain is its own
+      # site, so nothing in the database can stand in for this.
+      # Substitution falls back to localhost when .env leaves it empty, so
+      # a fresh clone resolves <slug>.localhost without extra setup.
+      - CLOUDFLARE_BASE_DOMAIN=${CLOUDFLARE_BASE_DOMAIN:-localhost}
+    ports:
+      - "5000:5000"
+      # The frontend's .env.development points VITE_API_BASE_URL at :5001,
+      # so publish the same backend on 5001 too (both host ports -> container
+      # 5000) — the SPA works out of the box with no frontend edits.
+      - "5001:5000"
+    # Force the prod backend-instance allocation: 4 GB RAM, 2 vCPU.
+    # (PROD storage target for this instance is 20 GB — enforced at the
+    # EBS layer in prod, not cappable via the local volume driver here.)
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    command:
+      - gunicorn
+      - --bind
+      - 0.0.0.0:5000
+      # Socket.IO + eventlet.monkey_patch() (wsgi.py) require the eventlet
+      # async worker — a single one, since Socket.IO polling must return to the
+      # same worker. Running the default *sync* worker against a monkey-patched
+      # stdlib deadlocks the worker under load (→ 120s timeout → SIGKILL).
+      - --worker-class
+      - eventlet
+      - --workers
+      - "1"
+      - --timeout
+      - "120"
+      - --reload
+      # inotify events do not cross a Windows/macOS bind mount, so the
+      # default 'auto' engine would silently stop reloading the moment
+      # the inotify package appeared in requirements. Poll explicitly.
+      - --reload-engine
+      - poll
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+      - wsgi:app
+    # Bind-mount the source so exec'd scripts run the live code (incl.
+    # the pricing-service is_default bypass) without an image rebuild.
+    # Only code paths are mounted — the image's /usr/local site-packages
+    # and /app/certs stay intact.
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      - ./migrations:/app/migrations
+      - ./config.py:/app/config.py
+      - ./wsgi.py:/app/wsgi.py
+      - ./create_platform_owner.py:/app/create_platform_owner.py
+      - ./create_admin.py:/app/create_admin.py
+      # Test suite, runnable in-container against the throwaway
+      # ``healthcare_test`` database + redis DB 1 (never the dev data):
+      #   docker exec -w /app -e PYTHONPATH=/app \
+      #     -e TEST_DATABASE_URL=... -e TEST_REDIS_URL=... \
+      #     jlmush-backend python -m pytest tests -p no:cacheprovider
+      # Read-only + no cacheprovider so pytest never writes into the repo.
+      - ./tests:/app/tests:ro
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1.6
+#
+# jlmush Redis — wraps the official redis:7-alpine image so we can:
+#   - require a password (REDIS_PASSWORD env var, set at runtime)
+#   - cap memory (REDIS_MAXMEMORY env var, default 256mb)
+#   - enable AOF persistence
+#
+FROM redis:7-alpine
+
+COPY redis-entrypoint.sh /usr/local/bin/redis-entrypoint.sh
+RUN chmod +x /usr/local/bin/redis-entrypoint.sh
+
+EXPOSE 6379
+
+ENTRYPOINT ["/usr/local/bin/redis-entrypoint.sh"]

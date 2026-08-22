@@ -1,0 +1,96 @@
+name: cron-verify-tenants
+
+# Phase 1 — daily cross-tenant routing health check.
+#
+# Runs scripts/verify_tenant_domains.py against the production DB and
+# the live tenant domains. The script's five stages:
+#   1. DB integrity (slug, domain, status=active)
+#   2. DNS resolves
+#   3. TLS handshake completes
+#   4. Public landing identifies the expected tenant
+#   5. Cross-tenant probe — forcing X-Tenant-Host to a different
+#      tenant's domain must NOT serve the foreign tenant's content.
+#
+# EXECUTION MODEL: GitHub Actions only provides the schedule; the
+# verifier itself runs ON THE EC2 BOX, inside the deployed
+# jlmush-backend container (which already has the code, deps and
+# DATABASE_URL). This is what allows RDS to be private
+# (publicly_accessible = false) — nothing outside the VPC ever
+# connects to the database.
+#
+# SECRETS: this job attaches to the `monitoring` environment, which
+# holds the SAME EC2_HOST / EC2_USER / EC2_SSH_KEY values as
+# `production`. A second environment rather than reusing `production`
+# because that one carries a required reviewer, and a reviewer gate on a
+# scheduled job means the nightly run sits in "Waiting" until somebody
+# approves it — a health check nobody approves is a health check that
+# never runs, and it would fail silently as "pending" rather than red.
+#
+# The security win is unchanged: the production SSH key is reachable
+# only from a job that names an environment holding it, never from an
+# arbitrary workflow reading repository-level secrets. The reviewer gate
+# is about deliberate DEPLOYS; this job only reads.
+#
+# Optional: set a DATABASE_URL_READONLY secret (a read-only DB role on
+# the PRIVATE endpoint) and the verifier uses it instead of the
+# container's read-write URL. The script never writes either way.
+#
+# Failure exits non-zero, which triggers a workflow failure GitHub
+# can email/notify on (configure in repo settings → Notifications).
+# Wire to PagerDuty/Slack via your existing on-call alerting.
+#
+# Manual run from the Actions tab is supported via workflow_dispatch.
+
+on:
+  schedule:
+    # Every day at 05:30 UTC (= 11:00 IST). Pick a window when the
+    # platform isn't being deployed — a transient TLS error during a
+    # rolling deploy would otherwise trigger a false alarm.
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: Verify tenant routing
+    runs-on: ubuntu-latest
+    environment: monitoring
+    # Don't run on forks.
+    if: ${{ github.repository_owner == 'csupendrareddys' }}
+
+    steps:
+      - name: Run verifier on the EC2 host
+        uses: appleboy/ssh-action@v1
+        env:
+          DATABASE_URL_READONLY: ${{ secrets.DATABASE_URL_READONLY }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: DATABASE_URL_READONLY
+          # The probe walks every active tenant's DNS/TLS/HTTP; give it
+          # headroom beyond the action's 10m default.
+          command_timeout: 20m
+          script: |
+            set -e
+
+            if ! docker ps --format '{{.Names}}' | grep -qx jlmush-backend; then
+              echo "jlmush-backend container is not running — is a deploy in progress?"
+              exit 1
+            fi
+
+            if [ -n "$DATABASE_URL_READONLY" ]; then
+              docker exec -e DATABASE_URL="$DATABASE_URL_READONLY" \
+                jlmush-backend python scripts/verify_tenant_domains.py
+            else
+              docker exec jlmush-backend python scripts/verify_tenant_domains.py
+            fi
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Tenant verification failed. Investigate the run output above."
+          # Hook your alerting here (Slack webhook, PagerDuty event,
+          # etc.). Example:
+          #   curl -fsS -X POST $SLACK_WEBHOOK_URL \
+          #     -H 'Content-Type: application/json' \
+          #     -d '{"text":"verify-tenants cron failed"}'
